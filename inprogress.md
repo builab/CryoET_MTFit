@@ -64,10 +64,18 @@ To allow connect far apart tubes, increase the --dist_extrapolate to 3000 and --
 mt_fit.py predict CCDC147C_001_particles_fitted_cleaned_connected.star --angpix 14 --template CCDC147C_001_particles.star --neighbor_rad 100 --max_delta_degree 15
 ```
 
-### One commandline for all
+### One commandline for all (fit -> clean -> connect -> predict)
 ```bash
 mt_fit.py pipeline CCDC147C_001_particles.star --angpix 14 --sample_step 82 --min_seed 6 --poly_order 3 --dist_thres 50 --dist_extrapolate 2000 --overlap_thres 100 --neighbor_rad 100 --template CCDC147C_001_particles.star 
 ```
+
+### Sort
+```bash
+mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --n_cilia 2 --rot_threshold 8
+```
+
+This is very experimental and needs more data to test. Should work well if two cilia are not parallel or a single cilia in the tomogram.
+
 
 ## USING INSIDE CHIMERAX
 Open ChimeraX with ArtiaX, load your template matching star file.

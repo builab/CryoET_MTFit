@@ -21,13 +21,11 @@ from .clean import (
     filter_by_direction
 )
 
-from .connect import (
-    connect_tubes
-)
+from .connect import connect_tubes
 
-from .predict import (
-    predict_angles
-)
+from .predict import predict_angles
+
+from .sort import group_and_sort
 
 __all__ = [
     # Fit functions
@@ -45,6 +43,8 @@ __all__ = [
     'load_coordinates',
     'read_star',
     'write_star',
+    # Sort function
+    'group_and_sort'
 ]
 
 __version__ = '1.0.0'

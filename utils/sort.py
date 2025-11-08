@@ -2,173 +2,118 @@
 # -*- coding: utf-8 -*-
 
 """
-Geom/Sort for ReLAX — cross-section extraction, ellipse fit, ordering, and plotting (nm-scaled).
+Geom/Sort for ReLAX – cross-section extraction, ellipse fit, ordering, and plotting (nm-scaled).
 
-- Works with STAR files that have either _rln* or rln* column names.
-- Reads pixel size from _rlnImagePixelSize (Å/px). You can override with --angpix.
-- Selects a cross-section via the shortest filament’s midpoint & a plane normal from local vectors.
-- Rotates into the Z plane (Psi/Tilt median), enforces consistent orientation (clockwise, right-facing).
-- Fits ellipse, assigns rlnAngleRot, optional virtual points for gaps, optional renumbering.
-- Plots in **nm** (correct scaling: nm = px * Å/px / 10).
-
-Usage:
-  python sort.py \
-    --input  example/CCDC147C_004_particles.star \
-    --output example/CCDC147C_004_particles_sorted.star \
-    --output-png example/cs_ellipse.png \
-    --fit-method ellipse \
-    --propagate \
-    --renumber
 """
 
 import argparse
-import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.linalg import lstsq
-import starfile
 
-# ----------------------------- utils / normalization -----------------------------
+from .io import validate_dataframe
+
+from scipy.linalg import lstsq
+from sklearn.cluster import DBSCAN, AgglomerativeClustering
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import linkage, fcluster
+import warnings
+warnings.filterwarnings('ignore')
+
+# ----------------------------- Basic utilities -----------------------------
 
 def normalize_angle(angle):
-    """Normalize angle to range -180..180 (Relion-style)."""
+    """Normalize angle to range -180..180."""
     return (angle + 180) % 360 - 180
 
-def strip_leading_underscore_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Map _rlnX → rlnX (without underscore) for internal consistency; keep originals too."""
-    mapping = {c: (c[1:] if c.startswith("_") else c) for c in df.columns}
-    df2 = df.copy()
-    df2.columns = [mapping[c] for c in df.columns]
-    return df2
+def px_to_nm(arr_px, pixel_size_A):
+    """Convert pixels to nanometers."""
+    return np.asarray(arr_px, float) * (float(pixel_size_A) / 10.0)
 
-def require_cols(df: pd.DataFrame, cols):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
 
-def infer_pixel_size_A(df_in: pd.DataFrame, override: float = None) -> float:
-    """Å/px from STAR; prefer _rlnImagePixelSize / rlnImagePixelSize; fallback to override."""
-    for name in ["_rlnImagePixelSize", "rlnImagePixelSize", "ImagePixelSize", "Angpix"]:
-        if name in df_in.columns and pd.notna(df_in[name]).any():
-            return float(pd.to_numeric(df_in[name], errors="coerce").dropna().iloc[0])
-    if override is not None:
-        return float(override)
-    raise ValueError("Pixel size not found. Provide --angpix or include _rlnImagePixelSize in STAR.")
-
-# ----------------------------- geometry helpers (your logic) -----------------------------
-
-def cumulative_distance(points):
-    d = np.linalg.norm(np.diff(points, axis=0), axis=1)
-    return np.concatenate(([0], np.cumsum(d)))
+# ----------------------------- Geometry functions -----------------------------
 
 def calculate_perpendicular_distance(point, plane_normal, reference_point):
+    """Calculate perpendicular distance from point to plane."""
     return np.abs(np.dot(plane_normal, point - reference_point)) / np.linalg.norm(plane_normal)
 
+
 def find_cross_section_points(data, plane_normal, reference_point):
-    """
-    For each filament, pick the point closest to the plane; also return the max min-distance.
-    Expects columns rlnHelicalTubeID, rlnCoordinateX/Y/Z (IN PIXELS).
-    """
+    """For each tube, pick the point closest to the plane."""
     cross_section = []
-    max_distance = 0
-    grouped = data.groupby('rlnHelicalTubeID', sort=False)
-    for filament_id, group in grouped:
+    for tube_id, group in data.groupby('rlnHelicalTubeID', sort=False):
         pts = group[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].to_numpy(float)
         dists = np.array([calculate_perpendicular_distance(p, plane_normal, reference_point) for p in pts])
-        min_dist = float(np.min(dists))
-        max_distance = max(max_distance, min_dist)
         closest = group.iloc[int(np.argmin(dists))].copy()
-        closest['distance_to_plane'] = min_dist
         cross_section.append(closest)
-    return pd.DataFrame(cross_section), max_distance
+    return pd.DataFrame(cross_section)
 
-def find_shortest_filament(data):
+
+def find_shortest_tube(data):
+    """Find the shortest tube and return its ID and midpoint."""
     shortest_len, shortest_mid, shortest_id = float('inf'), None, None
-    for filament_id, g in data.groupby('rlnHelicalTubeID', sort=False):
+    for tube_id, g in data.groupby('rlnHelicalTubeID', sort=False):
         pts = g[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].to_numpy(float)
         mn, mx = pts.min(axis=0), pts.max(axis=0)
         length = float(np.linalg.norm(mx - mn))
         if length < shortest_len:
-            shortest_len, shortest_mid, shortest_id = length, (mn + mx) / 2.0, filament_id
+            shortest_len, shortest_mid, shortest_id = length, (mn + mx) / 2.0, tube_id
     return shortest_id, shortest_mid
 
-def calculate_normal_vector(filament_points, window_size=3):
-    """
-    Local average of segment vectors around the midpoint (pixels). Ensures z-positive.
-    """
-    n = filament_points.shape[0]
+
+def calculate_normal_vector(tube_points, window_size=3):
+    """Calculate normal vector from local average of segment vectors."""
+    n = tube_points.shape[0]
     mid = n // 2
     s = max(mid - window_size, 0)
     e = min(mid + window_size, n - 1)
-    vecs = []
-    for i in range(s, e):
-        vecs.append(filament_points[i + 1] - filament_points[i])
-    vecs = np.asarray(vecs, float)
+    vecs = [tube_points[i + 1] - tube_points[i] for i in range(s, e)]
     avg = np.mean(vecs, axis=0)
     nv = avg / np.linalg.norm(avg)
-    if nv[2] < 0:  # enforce pointing +z
-        nv = -nv
-    return nv
+    return nv if nv[2] >= 0 else -nv  # enforce pointing +z
+
 
 def process_cross_section(data):
-    """
-    Find cross-section based on the midpoint of the SHORTEST filament.
-    """
-    shortest_id, midpoint = find_shortest_filament(data)
-    filament_pts = data.loc[data['rlnHelicalTubeID'] == shortest_id, ['rlnCoordinateX','rlnCoordinateY','rlnCoordinateZ']].to_numpy(float)
-    nvec = calculate_normal_vector(filament_pts)
+    """Find cross-section based on shortest tube's midpoint."""
+    shortest_id, midpoint = find_shortest_tube(data)
+    tube_pts = data.loc[data['rlnHelicalTubeID'] == shortest_id, 
+                        ['rlnCoordinateX','rlnCoordinateY','rlnCoordinateZ']].to_numpy(float)
+    nvec = calculate_normal_vector(tube_pts)
     return find_cross_section_points(data, nvec, midpoint)
 
+
 def rotate_cross_section(cross_section):
-    """
-    Rotate by median Psi (about Z) then median Tilt (about Y) to bring the section into the Z plane.
-    Mutates a copy of cross_section (pixels).
-    """
+    """Rotate cross-section into Z plane using median Psi and Tilt."""
     rotated = cross_section.copy()
     psi = 90 - float(np.nanmedian(rotated['rlnAnglePsi']))
     tilt = float(np.nanmedian(rotated['rlnAngleTilt']))
 
-    psi_rad = np.radians(psi)
-    tilt_rad = np.radians(tilt)
-    Rz = np.array([
-        [np.cos(-psi_rad), -np.sin(-psi_rad), 0],
-        [np.sin(-psi_rad),  np.cos(-psi_rad), 0],
-        [0, 0, 1]
-    ])
-    Ry = np.array([
-        [1, 0, 0],
-        [0, np.cos(-tilt_rad), -np.sin(-tilt_rad)],
-        [0, np.sin(-tilt_rad),  np.cos(-tilt_rad)]
-    ])
+    psi_rad, tilt_rad = np.radians(psi), np.radians(tilt)
+    Rz = np.array([[np.cos(-psi_rad), -np.sin(-psi_rad), 0],
+                   [np.sin(-psi_rad),  np.cos(-psi_rad), 0],
+                   [0, 0, 1]])
+    Ry = np.array([[1, 0, 0],
+                   [0, np.cos(-tilt_rad), -np.sin(-tilt_rad)],
+                   [0, np.sin(-tilt_rad),  np.cos(-tilt_rad)]])
 
     for idx, row in rotated.iterrows():
         v = np.array([row['rlnCoordinateX'], row['rlnCoordinateY'], row['rlnCoordinateZ']], float)
-        v = Rz @ v
-        v = Ry @ v
+        v = Ry @ (Rz @ v)
         rotated.at[idx, 'rlnCoordinateX'] = v[0]
         rotated.at[idx, 'rlnCoordinateY'] = v[1]
         rotated.at[idx, 'rlnCoordinateZ'] = v[2]
-
+    
     rotated[['rlnAngleTilt','rlnAnglePsi']] = 0
     return rotated
 
-def polygon_signed_area(points):
-    """Signed area (for orientation check). Negative → clockwise."""
-    area = 0.0
-    n = len(points)
-    for i in range(n):
-        x1, y1 = points[i]
-        x2, y2 = points[(i + 1) % n]
-        area += (x2 - x1) * (y2 + y1)
-    return area
 
-def enforce_consistent_cross_section_orientation(df):
-    """
-    Ensure rotated cross-section is clockwise and right-facing (pixels).
-    """
+def enforce_consistent_orientation(df):
+    """Ensure cross-section is clockwise and right-facing."""
     points = df[['rlnCoordinateX','rlnCoordinateY']].to_numpy(float)
-    area = polygon_signed_area(points)
+    # Calculate signed area
+    area = sum((points[(i+1)%len(points)][0] - points[i][0]) * 
+               (points[(i+1)%len(points)][1] + points[i][1]) for i in range(len(points)))
+    
     out = df.copy()
     if area > 0:  # counterclockwise → flip Y
         out['rlnCoordinateY'] = -out['rlnCoordinateY']
@@ -176,420 +121,786 @@ def enforce_consistent_cross_section_orientation(df):
         out['rlnCoordinateX'] = -out['rlnCoordinateX']
     return out
 
-# ----------------------------- ellipse math (your logic) -----------------------------
 
-def fit_ellipse(x, y, axis_handle=None):
-    """
-    Least-squares ellipse fit (Python port of the approach used in your script).
-    Returns dict with {a,b,phi,X0,Y0,X0_in,Y0_in,long_axis,short_axis,status}.
-    """
-    x = np.asarray(x).ravel().astype(float)
-    y = np.asarray(y).ravel().astype(float)
+# ----------------------------- Ellipse fitting -----------------------------
 
+def fit_ellipse(x, y):
+    """Least-squares ellipse fit. Returns dict with parameters."""
+    x, y = np.asarray(x).ravel().astype(float), np.asarray(y).ravel().astype(float)
+    
     if len(x) < 5:
-        print("WARNING: Not enough points to fit an ellipse!")
+        raise ValueError("Not enough points to fit an ellipse")
 
-    # de-bias for stability
+    # De-bias for stability
     mx, my = np.mean(x), np.mean(y)
-    x -= mx
-    y -= my
+    x, y = x - mx, y - my
 
     X = np.column_stack([x**2, x*y, y**2, x, y])
     a, _, _, _ = lstsq(X, -np.ones_like(x), lapack_driver='gelsy')
     A, B, C, D, E = a
 
-    disc = B**2 - 4*A*C
-    if disc >= 0:
-        warnings.warn("Invalid ellipse (discriminant >= 0).")
-        return {'a':None,'b':None,'phi':None,'X0':None,'Y0':None,'X0_in':None,'Y0_in':None,
-                'long_axis':None,'short_axis':None,'status':'Invalid'}
+    if B**2 - 4*A*C >= 0:
+        raise ValueError("Invalid ellipse (discriminant >= 0)")
 
     orientation = 0.5 * np.arctan2(B, (A - C))
     cphi, sphi = np.cos(orientation), np.sin(orientation)
 
     A_r = A * cphi**2 - B * cphi * sphi + C * sphi**2
     C_r = A * sphi**2 + B * cphi * sphi + C * cphi**2
-    D_r = D * cphi - E * sphi
-    E_r = D * sphi + E * cphi
+    D_r, E_r = D * cphi - E * sphi, D * sphi + E * cphi
 
     if A_r < 0 or C_r < 0:
         A_r, C_r, D_r, E_r = -A_r, -C_r, -D_r, -E_r
 
-    X0 = (mx - D_r / (2 * A_r))
-    Y0 = (my - E_r / (2 * C_r))
+    X0 = mx - D_r / (2 * A_r)
+    Y0 = my - E_r / (2 * C_r)
     F = 1 + (D_r**2) / (4 * A_r) + (E_r**2) / (4 * C_r)
-    a_len = np.sqrt(F / A_r)
-    b_len = np.sqrt(F / C_r)
+    a_len, b_len = np.sqrt(F / A_r), np.sqrt(F / C_r)
 
-    R = np.array([[cphi, sphi], [-sphi, cphi]])
-    X0_in, Y0_in = R @ np.array([X0, Y0])
-    long_axis = 2 * max(a_len, b_len)
-    short_axis = 2 * min(a_len, b_len)
+    return {'a': a_len, 'b': b_len, 'phi': orientation, 'X0': X0, 'Y0': Y0,
+            'long_axis': 2*max(a_len, b_len), 'short_axis': 2*min(a_len, b_len)}
 
-    return {'a':a_len,'b':b_len,'phi':orientation,'X0':X0,'Y0':Y0,
-            'X0_in':X0_in,'Y0_in':Y0_in,'long_axis':long_axis,'short_axis':short_axis,'status':'Success'}
 
 def ellipse_points(center, axes, angle, num_points=200):
+    """Generate points along an ellipse."""
     t = np.linspace(0, 2*np.pi, num_points)
     ellipse = np.array([axes[0]*np.cos(t), axes[1]*np.sin(t)])
     R = np.array([[np.cos(angle), -np.sin(angle)],
                   [np.sin(angle),  np.cos(angle)]])
     e_rot = R @ ellipse
-    e_rot[0] += center[0]
-    e_rot[1] += center[1]
-    return e_rot
+    return e_rot + np.array([[center[0]], [center[1]]])
+
 
 def angle_along_ellipse(center, axes, angle, points):
-    """Return parameter angle t (radians) along ellipse for given points."""
-    cos_a = np.cos(-angle)
-    sin_a = np.sin(-angle)
+    """Return parameter angle along ellipse for given points."""
+    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
     a, b = axes
-    out = []
-    for (px, py) in points:
-        xt = px - center[0]
-        yt = py - center[1]
+    angles = []
+    for px, py in points:
+        xt, yt = px - center[0], py - center[1]
         xr = xt * cos_a - yt * sin_a
         yr = xt * sin_a + yt * cos_a
-        t = np.arctan2(yr / b, xr / a)
-        out.append(t + angle)
-    return np.array(out)
+        angles.append(np.arctan2(yr / b, xr / a) + angle)
+    return np.array(angles)
 
-# ----------------------------- analysis / ordering -----------------------------
 
-def detect_multiple_missing_points(rot_angles, gap_threshold=50):
-    """
-    Find large angular gaps in rot angles → indicate missing filaments.
-    Returns list of (gap_start_angle, gap_end_angle) in degrees.
-    """
-    vals = np.sort(np.asarray(rot_angles, float))
-    gaps, pairs = [], []
-    for i in range(len(vals)):
-        nxt = vals[(i + 1) % len(vals)]
-        delta = (nxt - vals[i]) % 360
-        gaps.append(delta)
-        if delta > gap_threshold:
-            pairs.append((vals[i], nxt))
-    return pairs
-
-def calculate_ellipse_point(ellipse_params, theta_deg):
-    """Point on ellipse at theta (deg) using fitted params (pixels)."""
-    theta = np.radians(theta_deg)
-    phi = ellipse_params['phi']
-    x0, y0 = ellipse_params['X0'], ellipse_params['Y0']
-    a,  b  = ellipse_params['a'],  ellipse_params['b']
-    x = x0 + a * np.cos(theta) * np.cos(phi) - b * np.sin(theta) * np.sin(phi)
-    y = y0 + a * np.cos(theta) * np.sin(phi) + b * np.sin(theta) * np.cos(phi)
-    return x, y
-
-def calculate_rot_angles_ellipse(rotated_cross_section):
-    """
-    Fit ellipse, compute rlnAngleRot for each cross-section point.
-    Also create a version with virtual points where big gaps are detected.
-    """
+def calculate_rot_angles_simple(rotated_cross_section):
+    """Calculate rlnAngleRot using shortest path ordering."""
     df = rotated_cross_section.copy()
     pts = df[['rlnCoordinateX','rlnCoordinateY']].to_numpy(float)
-    x, y = pts[:,0], pts[:,1]
+    
+    # Start with first point
+    unvisited = list(range(len(pts)))
+    order = [unvisited.pop(0)]
+    current_pos = pts[order[0]]
+    
+    # Greedy shortest path: always go to nearest unvisited point
+    while unvisited:
+        distances = [np.linalg.norm(pts[i] - current_pos) for i in unvisited]
+        nearest_idx = unvisited[np.argmin(distances)]
+        order.append(nearest_idx)
+        unvisited.remove(nearest_idx)
+        current_pos = pts[nearest_idx]
+    
+    # Assign angles based on order (descending from 180 to -180)
+    n = len(order)
+    angles = np.linspace(180, -180, n, endpoint=False)
+    
+    # Map angles to original dataframe order
+    angle_map = {df.index[order[i]]: angles[i] for i in range(n)}
+    df['rlnAngleRot'] = df.index.map(angle_map)
+    
+    return df, None
 
-    ellipse = fit_ellipse(x, y)
-    if ellipse['a'] is None or ellipse['b'] is None:
-        raise RuntimeError("Ellipse fit failed.")
 
+def calculate_rot_angles_ellipse(rotated_cross_section):
+    """Fit ellipse and compute rlnAngleRot for each point."""
+    df = rotated_cross_section.copy()
+    pts = df[['rlnCoordinateX','rlnCoordinateY']].to_numpy(float)
+    
+    ellipse = fit_ellipse(pts[:,0], pts[:,1])
     center = [ellipse['X0'], ellipse['Y0']]
-    axes   = [ellipse['a'],  ellipse['b']]
-    phi    = ellipse['phi']
+    axes = [ellipse['a'], ellipse['b']]
+    phi = ellipse['phi']
 
-    # base rot angles
     ang = angle_along_ellipse(center, axes, phi, pts)
     ang = np.degrees(ang) - 270
-    ang = np.vectorize(normalize_angle)(ang)
-    df['rlnAngleRot'] = ang
+    df['rlnAngleRot'] = np.vectorize(normalize_angle)(ang)
+    
+    return df, ellipse
 
-    # Handle missing filaments (gaps)
-    df_virtual = df.copy()
-    gaps = detect_multiple_missing_points(df['rlnAngleRot'])
-    for k, (gap_s, gap_e) in enumerate(gaps):
-        # virtual at 40° from start
-        virt_theta = normalize_angle(gap_s - 40)
-        vx, vy = calculate_ellipse_point(ellipse, virt_theta)
-        dummy = df.iloc[0].copy()
-        dummy['rlnCoordinateX'] = vx
-        dummy['rlnCoordinateY'] = vy
-        dummy['rlnCoordinateZ'] = df['rlnCoordinateZ'].mean()
-        dummy['rlnHelicalTubeID'] = 999 + k  # ensure unique
-        dummy['rlnAngleRot'] = virt_theta
-        df_virtual = pd.concat([df_virtual, pd.DataFrame([dummy])], ignore_index=True)
 
-        # (Optional) update neighbors' angles — keeping original behavior light here.
+# ----------------------------- Ordering and propagation -----------------------------
 
-    return df, df_virtual, ellipse
-
-def get_filament_order_from_rot(rotated_cross_section):
+def get_tube_order_from_rot(cross_section):
     """Order tubes by descending rlnAngleRot."""
-    s = rotated_cross_section.sort_values('rlnAngleRot', ascending=False)
-    return s['rlnHelicalTubeID'].tolist()
+    return cross_section.sort_values('rlnAngleRot', ascending=False)['rlnHelicalTubeID'].tolist()
 
-def renumber_filament_ids(df_all, sorted_ids, cs_df):
-    """
-    Map old HelicalTubeID → new 1..N order based on sorted_ids (list of original IDs).
-    """
-    mapping = {orig: new_i + 1 for new_i, orig in enumerate(sorted_ids, start=0)}
+
+def renumber_tube_ids(df_all, sorted_ids, cs_df):
+    """Map old HelicalTubeID to new 1..N order."""
+    mapping = {orig: i + 1 for i, orig in enumerate(sorted_ids)}
     df_out = df_all.copy()
     cs_out = cs_df.copy()
     df_out['rlnHelicalTubeID'] = df_out['rlnHelicalTubeID'].map(mapping)
     cs_out['rlnHelicalTubeID'] = cs_out['rlnHelicalTubeID'].map(mapping)
     return df_out, cs_out, mapping
 
-def propagate_rot_to_entire_cilia(cs_with_rot, df_all):
-    """Broadcast rlnAngleRot from cross-section to whole dataset by HelicalTubeID."""
-    rot_lookup = cs_with_rot.set_index('rlnHelicalTubeID')['rlnAngleRot'].to_dict()
-    out = df_all.copy()
-    out['rlnAngleRot'] = out['rlnHelicalTubeID'].map(rot_lookup)
-    return out
 
-# ----------------------------- plotting (SAME STYLE, nm scaling) -----------------------------
-
-def _px_to_nm(arr_px, pixel_size_A: float):
-    return np.asarray(arr_px, float) * (float(pixel_size_A) / 10.0)
-
-def plot_cs(cross_section_px: pd.DataFrame, pixel_size_A: float, output_png: str = None):
+# ----------------------------- Plotting -----------------------------
+def plot_multiple_cilia(cross_sections_dict, pixel_size_A, ellipse_params_dict, out_png):
     """
-    Base cross-section plot (your original style) — now internally converts px → nm.
+    Plot cross-sections for multiple cilia in subplots.
     """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    cilia_ids = sorted(cross_sections_dict.keys())
+    n_cilia = len(cilia_ids)
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, n_cilia, figsize=(6*n_cilia, 6))
+    if n_cilia == 1:
+        axes = [axes]
+    
+    for idx, cilia_id in enumerate(cilia_ids):
+        ax = axes[idx]
+        cs = cross_sections_dict[cilia_id]
+        ellipse_params = ellipse_params_dict[cilia_id]
+        
+        if cs is None:
+            ax.text(0.5, 0.5, f'Cilium {cilia_id}\n(>9 tubes, not sorted)', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'Cilium {cilia_id}')
+            continue
+        
+        # Determine column names (handle different naming conventions)
+        if 'x_rot' in cs.columns:
+            x_col, y_col = 'x_rot', 'y_rot'
+        elif 'rlnCoordinateX' in cs.columns:
+            x_col, y_col = 'rlnCoordinateX', 'rlnCoordinateY'
+        else:
+            x_col, y_col = 'x', 'y'
+        
+        rot_col = 'rot_angle' if 'rot_angle' in cs.columns else 'rlnAngleRot'
+        
+        # Plot cross-section
+        ax.scatter(cs[x_col], cs[y_col], c=cs[rot_col], cmap='hsv', 
+                  s=100, edgecolors='black', linewidths=1)
+        
+        # Add tube labels
+        for _, row in cs.iterrows():
+            doublet_num = int(row['rlnHelicalTubeID'] % 10)
+            if doublet_num == 0:
+                doublet_num = 10
+            ax.text(row[x_col], row[y_col], str(doublet_num), 
+                   ha='center', va='center', fontsize=8, fontweight='bold')
+        
+        # Plot ellipse if available
+        if ellipse_params is not None:
+            try:
+                from matplotlib.patches import Ellipse
+                ellipse = Ellipse(xy=(ellipse_params['center_x'], ellipse_params['center_y']),
+                                width=2*ellipse_params['a'], height=2*ellipse_params['b'],
+                                angle=np.degrees(ellipse_params['theta']),
+                                edgecolor='red', fc='None', lw=2, linestyle='--')
+                ax.add_patch(ellipse)
+            except (KeyError, TypeError):
+                # Skip ellipse if parameters are missing
+                pass
+        
+        ax.set_aspect('equal')
+        ax.set_xlabel(f'X (Å)')
+        ax.set_ylabel(f'Y (Å)')
+        ax.set_title(f'Cilium {cilia_id}')
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"[info] Saved multi-cilium plot to {out_png}")
+    
+
+def plot_cross_section(cross_section_px, pixel_size_A, ellipse_params=None, output_png=None):
+    """Plot cross-section with optional ellipse fit."""
     cs = cross_section_px.reset_index(drop=True).copy()
-    Xnm = _px_to_nm(cs['rlnCoordinateX'], pixel_size_A)
-    Ynm = _px_to_nm(cs['rlnCoordinateY'], pixel_size_A)
+    Xnm = px_to_nm(cs['rlnCoordinateX'], pixel_size_A)
+    Ynm = px_to_nm(cs['rlnCoordinateY'], pixel_size_A)
 
-    plt.figure(figsize=(10, 6))
-    scatter = plt.scatter(Xnm, Ynm, c=cs['rlnHelicalTubeID'], cmap='viridis', s=100, edgecolors='k')
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(Xnm, Ynm, c=cs['rlnHelicalTubeID'], cmap='viridis', 
+                         s=100, edgecolors='k', zorder=3)
 
-    # circular line  FIX: connect in circular order
-    if 'rlnAngleRot' in cs.columns and cs['rlnAngleRot'].notna().all():
-        # Match your renumber/order logic: descending rlnAngleRot
+    # Draw connecting lines in circular order
+    if 'rlnAngleRot' in cs.columns:
         order = np.argsort(cs['rlnAngleRot'].to_numpy())[::-1]
     else:
-        # Fallback: polar angle about centroid (only used if rlnAngleRot absent)
         xc, yc = float(np.mean(Xnm)), float(np.mean(Ynm))
         order = np.argsort(np.arctan2(Ynm - yc, Xnm - xc))
-
-    # Xnm/Ynm are NumPy arrays → use plain indexing, not .iloc
-    xs = Xnm[order].tolist()
-    ys = Ynm[order].tolist()
-    xs.append(xs[0]); ys.append(ys[0])
+    
+    xs = Xnm[order].tolist() + [Xnm[order[0]]]
+    ys = Ynm[order].tolist() + [Ynm[order[0]]]
     plt.plot(xs, ys, 'k-', alpha=0.5, zorder=1)
 
-
-
-    # annotate
+    # Annotate tube IDs
     for i in range(len(cs)):
         plt.annotate(str(cs['rlnHelicalTubeID'][i]), (Xnm[i], Ynm[i]),
-                     textcoords="offset points", xytext=(0, 10), ha='center', fontsize=9)
+                    textcoords="offset points", xytext=(0, 10), ha='center', fontsize=9)
 
-    plt.xlabel('X (nm)')
-    plt.ylabel('Y (nm)')
-    plt.title('Filament Plot: X vs Y with Filament IDs and Circular Connecting Lines')
-    plt.colorbar(scatter, label='Filament ID')
-    plt.grid(True)
+    # Draw ellipse if provided
+    if ellipse_params:
+        center = [ellipse_params['X0'], ellipse_params['Y0']]
+        axes = [ellipse_params['a'], ellipse_params['b']]
+        angle = ellipse_params['phi']
+        fitted = ellipse_points(center, axes, angle)
+        
+        ex_nm = px_to_nm(fitted[0], pixel_size_A)
+        ey_nm = px_to_nm(fitted[1], pixel_size_A)
+        plt.plot(ex_nm, ey_nm, 'r--', label='Fitted Ellipse', linewidth=2, zorder=2)
+        
+        distortion = ellipse_params['a'] / ellipse_params['b']
+        mx_nm = float(np.mean(px_to_nm(cs['rlnCoordinateX'], pixel_size_A)))
+        my_nm = float(np.mean(px_to_nm(cs['rlnCoordinateY'], pixel_size_A)))
+        plt.text(mx_nm, my_nm, f"Distortion: {distortion:.2f}",
+                fontsize=10, ha='center', va='center', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        plt.legend()
+
+    plt.xlabel('X (nm)', fontsize=12)
+    plt.ylabel('Y (nm)', fontsize=12)
+    plt.title('Cross-Section: Tube Positions and Ellipse Fit', fontsize=14)
+    plt.colorbar(scatter, label='Tube ID')
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
 
     if output_png:
         plt.savefig(output_png, dpi=300, bbox_inches='tight')
         plt.close()
     else:
-        return plt
+        plt.show()
 
-def plot_ellipse_cs(cross_section_px: pd.DataFrame, output_png: str, pixel_size_A: float, full_star_data: pd.DataFrame = None):
+
+
+# ----------------------------- I/O and CLI -----------------------------
+
+def to_original_prefix(df, template_cols):
+    """Restore underscore prefix if input had it."""
+    if any(c.startswith("_rln") for c in template_cols):
+        rename = {c: f"_{c}" for c in df.columns if c.startswith("rln")}
+        return df.rename(columns=rename)
+    return df
+    
+# ----------------------------- Main pipeline -----------------------------
+
+def sort_doublet_order(df, pixel_size_A, fit_method='ellipse', out_png=None):
     """
-    Your ellipse-plotting function, unchanged in logic, but plotting in **nm**.
-    Ellipse fitting is done on **pixels** (scale-invariant), then drawn after px→nm conversion.
+    Main processing pipeline. Returns (df_out, cross_sections, ellipse_params_dict).
+    Handles multiple cilia by processing each separately.
     """
-    cs = cross_section_px.copy()
-    pts = cs[['rlnCoordinateX','rlnCoordinateY']].to_numpy(float)
-    x = pts[:,0]; y = pts[:,1]
-
-    try:
-        ellipse_params = fit_ellipse(x, y)
-        if ellipse_params['a'] is None or ellipse_params['b'] is None:
-            raise ValueError("Ellipse fitting failed: invalid parameters.")
-
-        center = [ellipse_params['X0'], ellipse_params['Y0']]
-        axes   = [ellipse_params['a'],  ellipse_params['b']]
-        angle  = ellipse_params['phi']
-        elliptical_distortion = ellipse_params['a'] / ellipse_params['b']
-
-        fitted = ellipse_points(center, axes, angle)
-
-        # order points (degrees)
-        angles = angle_along_ellipse(center, axes, angle, pts)
-        angles = angles / np.pi * 180  # for potential diagnostics
-
-        # base plot (nm)
-        plt_obj = plot_cs(cs, pixel_size_A=pixel_size_A, output_png=None)
-
-        # draw fitted ellipse in nm
-        ex_nm = _px_to_nm(fitted[0], pixel_size_A)
-        ey_nm = _px_to_nm(fitted[1], pixel_size_A)
-        plt.plot(ex_nm, ey_nm, 'r--', label='Fitted Ellipse')
-
-        # annotate distortion at mean(X,Y)
-        mx_nm = float(np.mean(_px_to_nm(x, pixel_size_A)))
-        my_nm = float(np.mean(_px_to_nm(y, pixel_size_A)))
-        plt.text(mx_nm, my_nm, f"Elliptical distortion: {elliptical_distortion:.2f}",
-                 fontsize=9, ha='center', va='center')
-
-        # REMOVED TANGENT VECTORS	
-        # optional rotation vectors from full_star_data
-        #if full_star_data is not None and 'rlnHelicalTubeID' in cs.columns:
-        #    rot_lookup = (full_star_data[['rlnHelicalTubeID','rlnAngleRot']]
-        #                  .drop_duplicates('rlnHelicalTubeID')
-        #                  .set_index('rlnHelicalTubeID')['rlnAngleRot']
-        #                  .to_dict())
-        #    cs['rlnAngleRot'] = cs['rlnHelicalTubeID'].map(rot_lookup)
-        #    for _, row in cs.iterrows():
-        #        if not pd.isna(row.get('rlnAngleRot', np.nan)):
-        #            x0_nm = float(_px_to_nm(row['rlnCoordinateX'], pixel_size_A))
-        #            y0_nm = float(_px_to_nm(row['rlnCoordinateY'], pixel_size_A))
-        #           theta = np.deg2rad(row['rlnAngleRot'])
-        #            dx, dy = np.cos(theta) * 10.0, np.sin(theta) * 10.0  # 10 nm arrow
-        #            plt.arrow(x0_nm, y0_nm, dx, dy, head_width=3, head_length=5,
-        #                      fc='blue', ec='blue', alpha=0.7)
-
-        plt.legend()
-        plt.xlabel('X (nm)')
-        plt.ylabel('Y (nm)')
-        plt.title("Ellipse Fit of Cross section")
-        plt.axis('equal')
-        plt.savefig(output_png, dpi=300, bbox_inches='tight')
-        plt.close()
-        return elliptical_distortion
-
-    except Exception as e:
-        print(f"WARNING: {e}")
-        # fallback: just base plot
-        plot_cs(cs, pixel_size_A=pixel_size_A, output_png=output_png)
-        return -1.0
-
-# ----------------------------- pipeline -----------------------------
-
-def run_pipeline(df_in: pd.DataFrame, pixel_size_A: float,
-                 fit_method: str = "ellipse",
-                 propagate: bool = True,
-                 renumber: bool = False,
-                 out_png: str = None):
-    """
-    Returns (df_out, cross_section_rot, ellipse_params or None).
-    df_out has rlnAngleRot propagated (if propagate), and possibly renumbered IDs.
-    """
-    # Use rln* columns internally
-    df = strip_leading_underscore_cols(df_in)
-
-    # Required cols
-    require_cols(df, ['rlnCoordinateX','rlnCoordinateY','rlnCoordinateZ','rlnHelicalTubeID'])
-    for c in ['rlnAngleTilt','rlnAnglePsi']:
-        if c not in df.columns:
-            # fill zeros if missing (rotation still works)
-            df[c] = 0.0
-
-    # 1) cross-section (pixels)
-    cs, _ = process_cross_section(df)
-
-    # 2) rotate into Z plane + orientation consistency (pixels)
-    cs_rot = rotate_cross_section(cs)
-    cs_rot = enforce_consistent_cross_section_orientation(cs_rot)
-
-    # 3) ellipse method (recommended)
-    ellipse_params = None
-    if fit_method.lower() == "ellipse":
-        cs_with_rot, cs_with_virtual, ellipse_params = calculate_rot_angles_ellipse(cs_rot)
-        cs_for_order = cs_with_rot
-    else:
-        # simple method (fallback) — reuse cs_rot without ellipse angles
-        cs_with_rot = cs_rot.copy()
-        cs_for_order = cs_rot.copy()
-
-    # 4) get order & optional renumber
-    order_ids = get_filament_order_from_rot(cs_for_order) if 'rlnAngleRot' in cs_for_order.columns else cs_for_order['rlnHelicalTubeID'].tolist()
+    validate_dataframe(df, ['rlnCoordinateX','rlnCoordinateY','rlnCoordinateZ','rlnHelicalTubeID'])
+    
+    # Check if rlnCiliaGroup exists
+    if 'rlnCiliaGroup' not in df.columns:
+        print("[WARNING] rlnCiliaGroup column not found. Processing as single cilium.")
+        df = df.copy()
+        df['rlnCiliaGroup'] = 1
+    
+    # Get unique cilia groups
+    cilia_groups = sorted(df['rlnCiliaGroup'].unique())
+    n_cilia = len(cilia_groups)
+    
+    print(f"[info] Found {n_cilia} cilia group(s)")
+    
+    # Initialize output containers
     df_out = df.copy()
-    cs_out = cs_with_rot.copy()
-
-    if renumber and len(order_ids) > 0:
-        df_out, cs_out, mapping = renumber_filament_ids(df_out, order_ids, cs_out)
-        print(f"[info] Renumbered HelicalTubeID using ellipse order. Mapping: {mapping}")
-
-    # 5) propagate rlnAngleRot to whole dataset (optional)
-    if propagate and 'rlnAngleRot' in cs_out.columns:
-        df_out = propagate_rot_to_entire_cilia(cs_out, df_out)
-
-    # 6) plot (nm scaling via pixel_size_A)
+    all_cross_sections = {}
+    all_ellipse_params = {}
+    all_mappings = {}  # Store mappings for all cilia
+    
+    # Process each cilium separately
+    for cilia_id in cilia_groups:
+        print(f"\n[info] Processing Cilium {cilia_id}")
+        
+        # Extract data for this cilium
+        cilia_mask = df['rlnCiliaGroup'] == cilia_id
+        df_cilia = df[cilia_mask].copy()
+        
+        # Check tube count for this cilium
+        n_tubes = df_cilia['rlnHelicalTubeID'].nunique()
+        if n_tubes > 9:
+            print(f"[WARNING] Cilium {cilia_id} has {n_tubes} tubes (> 9). Skipping sorting for this cilium.")
+            all_cross_sections[cilia_id] = None
+            all_ellipse_params[cilia_id] = None
+            continue
+            
+        print(f"[info] Cilium {cilia_id}: Processing {n_tubes} tubes using {fit_method} method")
+        
+        # Process cross-section
+        cs = process_cross_section(df_cilia)
+        cs_rot = rotate_cross_section(cs)
+        cs_rot = enforce_consistent_orientation(cs_rot)
+        
+        # Calculate rotation angles based on method
+        if fit_method.lower() == 'ellipse':
+            cs_with_rot, ellipse_params = calculate_rot_angles_ellipse(cs_rot)
+        else:  # simple method
+            cs_with_rot, ellipse_params = calculate_rot_angles_simple(cs_rot)
+        
+        # Get tube order
+        order_ids = get_tube_order_from_rot(cs_with_rot)
+        
+        # Store cross-section and ellipse params
+        all_cross_sections[cilia_id] = cs_with_rot.copy()
+        all_ellipse_params[cilia_id] = ellipse_params
+        
+        # Renumber
+        doublet_mapping = {tube_id: idx + 1 for idx, tube_id in enumerate(order_ids)}
+        all_mappings[cilia_id] = doublet_mapping
+            
+        print(f"[info] Cilium {cilia_id} renumbering: {doublet_mapping}")
+    
+    # Apply all renumbering at once to avoid conflicts
+    if len(all_mappings) > 0:
+        print(f"\n[info] Applying tube ID renumbering...")
+        
+        # First pass: assign temporary negative IDs to avoid conflicts
+        temp_mapping = {}
+        for cilia_id, doublet_mapping in all_mappings.items():
+            for old_id, doublet_num in doublet_mapping.items():
+                temp_id = -1000 - old_id  # Use negative temporary IDs
+                df_out.loc[df_out['rlnHelicalTubeID'] == old_id, 'rlnHelicalTubeID'] = temp_id
+                temp_mapping[temp_id] = (cilia_id, doublet_num)
+                
+                # Update cross-section dataframe
+                all_cross_sections[cilia_id].loc[
+                    all_cross_sections[cilia_id]['rlnHelicalTubeID'] == old_id, 
+                    'rlnHelicalTubeID'
+                ] = temp_id
+        
+        # Second pass: assign final IDs
+        for temp_id, (cilia_id, doublet_num) in temp_mapping.items():
+            new_tube_id = (cilia_id - 1) * 10 + doublet_num
+            df_out.loc[df_out['rlnHelicalTubeID'] == temp_id, 'rlnHelicalTubeID'] = new_tube_id
+            
+            # Update cross-section dataframe
+            all_cross_sections[cilia_id].loc[
+                all_cross_sections[cilia_id]['rlnHelicalTubeID'] == temp_id, 
+                'rlnHelicalTubeID'
+            ] = new_tube_id
+        
+        print(f"[info] Renumbering complete!")
+    
+    # Plot if requested
     if out_png:
-        plot_ellipse_cs(cs_out, output_png=out_png, pixel_size_A=pixel_size_A, full_star_data=df_out)
+        if n_cilia == 1:
+            # Single cilium - use existing plot function
+            cilia_id = cilia_groups[0]
+            if all_cross_sections[cilia_id] is not None:
+                plot_cross_section(all_cross_sections[cilia_id], pixel_size_A, 
+                                 all_ellipse_params[cilia_id], out_png)
+        else:
+            # Multiple cilia - plot each separately with cilium ID in filename
+            for cilia_id in cilia_groups:
+                if all_cross_sections[cilia_id] is not None:
+                    # Create output filename with cilium ID
+                    base_name = out_png.rsplit('.', 1)[0]
+                    ext = out_png.rsplit('.', 1)[1] if '.' in out_png else 'png'
+                    cilia_png = f"{base_name}_cilium{cilia_id}.{ext}"
+                    
+                    plot_cross_section(all_cross_sections[cilia_id], pixel_size_A,
+                                     all_ellipse_params[cilia_id], cilia_png)
+    
+    return df_out
 
-    # Return with original column prefixes preserved when writing
-    return df_out, cs_out, ellipse_params
 
-# ----------------------------- I/O / CLI -----------------------------
+def compute_tube_medians(df):
+    """Compute median values for each tube."""
+    # Get pixel size (angpix) from the first row (should be same for all)
+    angpix = df['rlnImagePixelSize'].iloc[0]
+    
+    # Create a copy to avoid modifying original dataframe
+    df_scaled = df.copy()
+    
+    # Convert coordinates from pixels to Angstroms
+    df_scaled['rlnCoordinateX'] = df['rlnCoordinateX'] * angpix
+    df_scaled['rlnCoordinateY'] = df['rlnCoordinateY'] * angpix
+    df_scaled['rlnCoordinateZ'] = df['rlnCoordinateZ'] * angpix
+    
+    # Compute medians on scaled coordinates
+    tube_stats = df_scaled.groupby('rlnHelicalTubeID').agg({
+        'rlnAngleRot': 'median',
+        'rlnAngleTilt': 'median',
+        'rlnAnglePsi': 'median',
+        'rlnCoordinateX': 'median',
+        'rlnCoordinateY': 'median',
+        'rlnCoordinateZ': 'median',
+        'rlnHelicalTubeID': 'count'  # Number of points per tube
+    }).rename(columns={'rlnHelicalTubeID': 'n_points'})
+    
+    return tube_stats
 
-def parse_args():
-    p = argparse.ArgumentParser(description="ReLAX sort: cross-section ellipse ordering & nm plotting.")
-    p.add_argument("--input", required=True, help="Input STAR")
-    p.add_argument("--output", required=True, help="Output STAR")
-    p.add_argument("--output-png", default=None, help="Output PNG (ellipse plot, nm-scaled)")
-    p.add_argument("--fit-method", default="ellipse", choices=["ellipse","simple"], help="Ordering method")
-    p.add_argument("--propagate", action="store_true", help="Propagate rlnAngleRot to entire dataset")
-    p.add_argument("--renumber", action="store_true", help="Renumber rlnHelicalTubeID by ellipse order")
-    p.add_argument("--angpix", type=float, default=None, help="Override Å/pixel if STAR lacks _rlnImagePixelSize")
-    return p.parse_args()
+def angular_difference(angle1, angle2):
+    """Compute minimum angular difference considering periodicity."""
+    diff = np.abs(angle1 - angle2)
+    return np.minimum(diff, 360 - diff)
 
-def to_original_prefix(df: pd.DataFrame, template_cols: list[str]) -> pd.DataFrame:
-    """Write columns with leading underscore if that’s what the input had."""
-    # If template has _rln*, we convert rln* back to _rln*
-    uses_underscore = any(c.startswith("_rln") for c in template_cols)
-    if not uses_underscore:
-        return df
-    out = df.copy()
-    rename = {c: f"_{c}" for c in out.columns if c.startswith("rln")}
-    out = out.rename(columns=rename)
-    return out
-
-def main():
-    args = parse_args()
-
-    tbl = starfile.read(args.input)
-    if isinstance(tbl, dict):
-        key = next(iter(tbl.keys()))
-        df_in = tbl[key].copy()
-        input_cols = list(df_in.columns)
+def classify_cilia_groups(tube_stats, n_cilia=None, tilt_psi_threshold=15, coord_threshold=100):
+    """
+    Classify tubes into cilia groups based on Tilt/Psi angles and coordinates.
+    
+    Parameters:
+    -----------
+    tube_stats : DataFrame with median values per tube
+    n_cilia : int or None, expected number of cilia (if None, auto-detect)
+    tilt_psi_threshold : float, angular difference threshold for Tilt/Psi (degrees)
+    coord_threshold : float, spatial distance threshold for parallel cilia
+    """
+    n_tubes = len(tube_stats)
+    tube_ids = tube_stats.index.values
+    
+    # Compute pairwise angular differences for Tilt and Psi
+    tilt_vals = tube_stats['rlnAngleTilt'].values
+    psi_vals = tube_stats['rlnAnglePsi'].values
+    
+    # Create distance matrix based on Tilt and Psi
+    angular_dist = np.zeros((n_tubes, n_tubes))
+    for i in range(n_tubes):
+        for j in range(i+1, n_tubes):
+            tilt_diff = angular_difference(tilt_vals[i], tilt_vals[j])
+            psi_diff = angular_difference(psi_vals[i], psi_vals[j])
+            # Combined angular distance
+            angular_dist[i, j] = np.sqrt(tilt_diff**2 + psi_diff**2)
+            angular_dist[j, i] = angular_dist[i, j]
+    
+    # If n_cilia is specified, use it directly
+    if n_cilia is not None:
+        print(f"Using specified number of cilia: {n_cilia}")
+        
+        if n_cilia == 1:
+            cilia_labels = np.zeros(n_tubes, dtype=int)
+        else:
+            # Try angular clustering first
+            clustering = AgglomerativeClustering(n_clusters=n_cilia, linkage='average')
+            angle_labels = clustering.fit_predict(angular_dist)
+            
+            # Check if angular clustering gives reasonable results
+            unique, counts = np.unique(angle_labels, return_counts=True)
+            min_tubes_per_cilium = counts.min()
+            
+            # If angular clustering gives very unbalanced groups, use spatial clustering
+            if min_tubes_per_cilium < 3 or counts.max() / counts.min() > 5:
+                print("Angular clustering unbalanced, trying spatial clustering...")
+                coords = tube_stats[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
+                coords_normalized = (coords - coords.mean(axis=0)) / coords.std(axis=0)
+                
+                spatial_clustering = AgglomerativeClustering(n_clusters=n_cilia, linkage='average')
+                cilia_labels = spatial_clustering.fit_predict(coords_normalized)
+            else:
+                cilia_labels = angle_labels
     else:
-        df_in = tbl.copy()
-        input_cols = list(df_in.columns)
+        # Auto-detect mode
+        print("Auto-detecting number of cilia...")
+        
+        # Try to cluster based on angles first
+        clustering = AgglomerativeClustering(n_clusters=None, 
+                                             distance_threshold=tilt_psi_threshold*np.sqrt(2),
+                                             linkage='average')
+        
+        if n_tubes > 1:
+            angle_labels = clustering.fit_predict(angular_dist)
+            n_angle_clusters = len(np.unique(angle_labels))
+        else:
+            angle_labels = np.array([0])
+            n_angle_clusters = 1
+        
+        print(f"Angular clustering found {n_angle_clusters} potential cilia groups")
+        
+        # If angles suggest parallel cilia, use spatial clustering
+        if n_angle_clusters == 1 and n_tubes > 9:
+            print("Angles suggest parallel cilia or single cilium. Using spatial clustering...")
+            coords = tube_stats[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
+            
+            # Normalize coordinates for clustering
+            coords_normalized = (coords - coords.mean(axis=0)) / coords.std(axis=0)
+            
+            # Try clustering into 2 groups
+            spatial_clustering = AgglomerativeClustering(n_clusters=2, linkage='average')
+            spatial_labels = spatial_clustering.fit_predict(coords_normalized)
+            
+            # Check if spatial clustering makes sense (both groups should have reasonable size)
+            unique, counts = np.unique(spatial_labels, return_counts=True)
+            if counts.min() >= 4:  # At least 4 tubes per cilium
+                print(f"Spatial clustering: Group sizes = {counts}")
+                cilia_labels = spatial_labels
+            else:
+                print("Spatial clustering suggests single cilium")
+                cilia_labels = angle_labels
+        else:
+            cilia_labels = angle_labels
+    
+    # Create cilia group assignments
+    cilia_groups = {}
+    for tube_id, label in zip(tube_ids, cilia_labels):
+        if label not in cilia_groups:
+            cilia_groups[label] = []
+        cilia_groups[label].append(tube_id)
+    
+    return cilia_groups, cilia_labels
 
-    # Pixel size (Å/px)
-    pxA = infer_pixel_size_A(df_in, args.angpix)
-    print(f"[info] Pixel size: {pxA:.4f} Å/px = {pxA/10.0:.4f} nm/px")
+def classify_doublet_microtubules(tube_stats, cilia_groups, rot_threshold=10, enforce_9_doublets=False):
+    """
+    Within each cilium, group tubes by rlnAngleRot to identify doublet microtubules.
+    
+    Parameters:
+    -----------
+    tube_stats : DataFrame with median values per tube
+    cilia_groups : dict mapping cilium label to list of tube IDs
+    rot_threshold : float, angular difference threshold for Rot (degrees)
+    enforce_9_doublets : bool, if True, force exactly 9 doublets per cilium
+    """
+    doublet_assignments = {}
+    
+    for cilium_id, tube_list in cilia_groups.items():
+        print(f"\nProcessing Cilium {cilium_id + 1} with {len(tube_list)} tubes:")
+        
+        rot_vals = tube_stats.loc[tube_list, 'rlnAngleRot'].values
+        
+        #print(f"  DEBUG: Tube IDs: {tube_list}")
+        #print(f"  DEBUG: Rot Values: {rot_vals.tolist()}")
+        
+        if len(tube_list) == 1:
+            doublet_assignments[tube_list[0]] = (cilium_id + 1, 1)
+            continue
+        
+        # Get Rot values for tubes in this cilium
+        rot_vals = tube_stats.loc[tube_list, 'rlnAngleRot'].values
+        
+        # Compute pairwise Rot differences
+        n = len(tube_list)
+        rot_dist = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i+1, n):
+                rot_diff = angular_difference(rot_vals[i], rot_vals[j])
+                rot_dist[i, j] = rot_diff
+                rot_dist[j, i] = rot_diff
+        
+        #print(f"  DEBUG: Rot Distance Matrix (first 5x5):")
+        #print(rot_dist)
+        # Cluster based on Rot angle
+        if enforce_9_doublets and len(tube_list) >= 9:
+            # Force exactly 9 clusters
+            # affinity=precomputed is very important
+            clustering = AgglomerativeClustering(n_clusters=9, linkage='average', affinity='precomputed')
+            doublet_labels = clustering.fit_predict(rot_dist)
+            print(f"  Enforcing 9 doublets (from {len(tube_list)} tubes)")
+        else:
+            # Auto-detect number of doublets
+            clustering = AgglomerativeClustering(n_clusters=None,
+                                                distance_threshold=rot_threshold,
+                                                linkage='single', affinity='precomputed')
+            doublet_labels = clustering.fit_predict(rot_dist)
+            n_doublets = len(np.unique(doublet_labels))
+            print(f"  Found {n_doublets} potential doublet groups")
+            
+            # Warn if not 9 doublets
+            if n_doublets != 9:
+                print(f"  ⚠️  WARNING: Expected 9 doublets but found {n_doublets}!")
+                print(f"      Consider adjusting rot_threshold (current: {rot_threshold}°)")
+                if n_doublets > 9:
+                    print(f"      → Try increasing rot_threshold to merge more tubes")
+                else:
+                    print(f"      → Try decreasing rot_threshold or check for missing tubes")
+        
+        # Assign doublet IDs (store as tuple: cilium_group, doublet_number)
+        for tube_id, doublet_label in zip(tube_list, doublet_labels):
+            doublet_assignments[tube_id] = (cilium_id + 1, doublet_label + 1)
+        
+        # Print detailed doublet assignments with Rot angles
+        doublet_dict = {}
+        for tube_id, (cil_id, dbl_id) in doublet_assignments.items():
+            if tube_id in tube_list:
+                doublet_key = f"C{cil_id}_D{dbl_id}"
+                if doublet_key not in doublet_dict:
+                    doublet_dict[doublet_key] = []
+                rot = tube_stats.loc[tube_id, 'rlnAngleRot']
+                doublet_dict[doublet_key].append((tube_id, rot))
+        
+        print(f"  Doublet assignments (with rlnAngleRot):")
+        for doublet_id in sorted(doublet_dict.keys()):
+            tubes_info = doublet_dict[doublet_id]
+            tubes_str = ', '.join([f"Tube {tid} ({rot:.1f}°)" for tid, rot in tubes_info])
+            print(f"    {doublet_id}: {tubes_str}")
+    
+    return doublet_assignments
 
-    df_out, cs_out, ellipse_params = run_pipeline(
-        df_in=df_in,
-        pixel_size_A=pxA,
-        fit_method=args.fit_method,
-        propagate=args.propagate,
-        renumber=args.renumber,
-        out_png=args.output_png
+def create_grouped_dataframe(df, doublet_assignments):
+    """
+    Create output dataframe with rlnCiliaGroup and renumbered rlnHelicalTubeID.
+    
+    Parameters:
+    -----------
+    df : original DataFrame with all particles
+    doublet_assignments : dict mapping original tube IDs to (cilium_group, doublet_id) tuples
+    
+    Returns:
+    --------
+    output_df : DataFrame with added rlnCiliaGroup and renumbered rlnHelicalTubeID
+    """
+    # Create a copy of the original dataframe
+    output_df = df.copy()
+    
+    # Create mapping from original tube ID to new values
+    tube_id_mapping = {}
+    cilia_group_mapping = {}
+    
+    for orig_tube_id, (cilium_group, doublet_id) in doublet_assignments.items():
+        # Calculate new tube ID: (CiliaGroup - 1) * 10 + DoubletID
+        new_tube_id = (cilium_group - 1) * 10 + doublet_id
+        tube_id_mapping[orig_tube_id] = new_tube_id
+        cilia_group_mapping[orig_tube_id] = cilium_group
+    
+    # Renumber rlnHelicalTubeID first
+    output_df['rlnHelicalTubeID'] = output_df['rlnHelicalTubeID'].map(tube_id_mapping)
+    
+    # Add rlnCiliaGroup column
+    output_df['rlnCiliaGroup'] = output_df['rlnHelicalTubeID'].apply(lambda x: (x // 10) + 1)
+    
+    # Sort by rlnHelicalTubeID (small to large) and then by rlnCoordinateY (small to large)
+    output_df = output_df.sort_values(by=['rlnHelicalTubeID', 'rlnCoordinateY'], 
+                                       ascending=[True, True]).reset_index(drop=True)
+
+    
+    return output_df, tube_id_mapping
+
+def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_threshold=900, rot_threshold=8, enforce_9_doublets=False):
+    """
+    Main function to classify ciliary tubes and output results.
+    
+    Parameters:
+    -----------
+    df : dataframe of the star file
+    n_cilia : int or None, expected number of cilia (if None, auto-detect)
+    tilt_psi_threshold : float, angular threshold for Tilt/Psi similarity (degrees)
+    coord_threshold : float, spatial distance threshold (Angstroms)
+    rot_threshold : float, angular threshold for Rot similarity (degrees, default 5)
+    enforce_9_doublets : bool, force exactly 9 doublets per cilium
+    """
+    print("="*80)
+    print("CILIA TUBE CLASSIFICATION")
+    print("="*80)
+    
+    # Load data
+    print(f"Loaded {len(df)} particles from {df['rlnHelicalTubeID'].nunique()} tubes")
+    
+    # Compute median values per tube
+    tube_stats = compute_tube_medians(df)
+    print(f"\nTube statistics computed for {len(tube_stats)} tubes")
+    print(f"Points per tube range: {tube_stats['n_points'].min()} - {tube_stats['n_points'].max()}")
+    
+    # Classify into cilia groups
+    print("\n" + "-"*80)
+    print("STEP 1: Classifying tubes into cilia groups")
+    print("-"*80)
+    cilia_groups, cilia_labels = classify_cilia_groups(tube_stats, 
+                                                       n_cilia,
+                                                       tilt_psi_threshold, 
+                                                       coord_threshold)
+    
+    print(f"\nFound {len(cilia_groups)} cilia group(s):")
+    for cilium_id, tubes in cilia_groups.items():
+        print(f"  Cilium {cilium_id + 1}: {len(tubes)} tubes - {tubes}")
+    
+    # Classify doublet microtubules within each cilium
+    print("\n" + "-"*80)
+    print("STEP 2: Classifying doublet microtubules within each cilium")
+    print("-"*80)
+    doublet_assignments = classify_doublet_microtubules(tube_stats, 
+                                                        cilia_groups, 
+                                                        rot_threshold,
+                                                        enforce_9_doublets)
+    
+    # Print final results
+    print("\n" + "="*80)
+    print("FINAL CLASSIFICATION RESULTS")
+    print("="*80)
+    
+    for cilium_id, tubes in cilia_groups.items():
+        print(f"\nCilium {cilium_id + 1}:")
+        doublets_in_cilium = {}
+        for tube_id in tubes:
+            cil_grp, dbl_id = doublet_assignments[tube_id]
+            doublet_key = f"C{cil_grp}_D{dbl_id}"
+            if doublet_key not in doublets_in_cilium:
+                doublets_in_cilium[doublet_key] = []
+            doublets_in_cilium[doublet_key].append(tube_id)
+        
+        for doublet_key, tube_list in sorted(doublets_in_cilium.items()):
+            print(f"  {doublet_key}: Tubes {tube_list}")
+    
+    # Create summary results dataframe
+    results = pd.DataFrame({
+        'OriginalTubeID': list(doublet_assignments.keys()),
+        'CiliumGroup': [doublet_assignments[tid][0] for tid in doublet_assignments.keys()],
+        'DoubletNumber': [doublet_assignments[tid][1] for tid in doublet_assignments.keys()],
+        'NewTubeID': [(doublet_assignments[tid][0] - 1) * 10 + doublet_assignments[tid][1] 
+                      for tid in doublet_assignments.keys()],
+        'MedianRot': [tube_stats.loc[tid, 'rlnAngleRot'] for tid in doublet_assignments.keys()],
+        'MedianTilt': [tube_stats.loc[tid, 'rlnAngleTilt'] for tid in doublet_assignments.keys()],
+        'MedianPsi': [tube_stats.loc[tid, 'rlnAnglePsi'] for tid in doublet_assignments.keys()],
+    })
+    
+    print("\n" + "="*80)
+    print("\nResults summary:")
+    print(results.to_string(index=False))
+    
+    # Create output dataframe with modified columns
+    print("\n" + "-"*80)
+    print("STEP 3: Creating output dataframe")
+    print("-"*80)
+    output_df, tube_id_mapping = create_grouped_dataframe(df, doublet_assignments)
+    
+    print(f"\nOutput dataframe created with {len(output_df)} particles")
+    print(f"New columns added: rlnCiliaGroup")
+    print(f"rlnHelicalTubeID renumbered according to: (CiliaGroup - 1) * 10 + DoubletID")
+    
+    # Display tube ID mapping
+    print("\nTube ID mapping:")
+    for orig_id in sorted(tube_id_mapping.keys()):
+        new_id = tube_id_mapping[orig_id]
+        cil_grp, dbl_num = doublet_assignments[orig_id]
+        print(f"  Original Tube {orig_id} → New Tube {new_id} (Cilium {cil_grp}, Doublet {dbl_num})")
+        
+    return output_df
+
+
+def group_and_sort(
+    df: pd.DataFrame,
+    angpix: float,
+    n_cilia=None,
+    tilt_psi_threshold: float=10,
+    coord_threshold: float=900,
+    rot_threshold: float=8,
+    enforce_9_doublets: bool=False,
+    fit_method: str='ellipse',
+    out_png: str=None,
+) -> pd.DataFrame:
+
+    # Run group cilia
+    grouped_df = group_cilia_and_doublets(df=df, 
+                                           n_cilia=n_cilia,
+                                           tilt_psi_threshold=tilt_psi_threshold,
+                                           coord_threshold=coord_threshold,
+                                           rot_threshold=rot_threshold,
+                                           enforce_9_doublets=enforce_9_doublets)
+    # Run sort
+    sorted_df = sort_doublet_order(
+        df=grouped_df,
+        pixel_size_A=angpix,
+        fit_method=fit_method,
+        out_png=out_png
     )
 
-    # Preserve input’s _rln* naming style on write
-    write_obj = None
-    if isinstance(tbl, dict):
-        key = next(iter(tbl.keys()))
-        out_block = to_original_prefix(df_out, input_cols)
-        tbl[key] = out_block
-        write_obj = tbl
-    else:
-        write_obj = to_original_prefix(df_out, input_cols)
+    if out_png:
+        print(f"[info] Saved plot → {out_png}")
 
-    starfile.write(write_obj, args.output, overwrite=True)
-    print(f"[info] Wrote STAR → {args.output}")
-    if args.output_png:
-        print(f"[info] Saved plot → {args.output_png}")
-
-if __name__ == "__main__":
-    main()
-
-
+    return sorted_df

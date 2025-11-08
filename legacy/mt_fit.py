@@ -25,8 +25,6 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from utils.fit import fit_curves
 from utils.connect import connect_tubes
-from utils.predict import predict_angles
-from utils.sort import group_and_sort
 
 from utils.clean import (
     clean_tubes,
@@ -34,6 +32,7 @@ from utils.clean import (
     filter_by_direction
 )
     
+from utils.predict import predict_angles
 from utils.io import read_star, write_star, validate_dataframe, load_coordinates
 
 # =============================================================================
@@ -119,25 +118,6 @@ def parse_psi_range(psi_range_str: str) -> tuple:
     
     except ValueError as e:
         raise ValueError(f"Invalid psi_range format: {psi_range_str}. {e}")
-        
-        
-def save_output_or_exit(df: pd.DataFrame, output_file: str, success_msg: str = None) -> None:
-    """
-    Save dataframe to STAR file or exit if empty.
-    
-    Parameters:
-    -----------
-    df : DataFrame to save
-    output_file : path to output file
-    success_msg : optional custom success message (default: "Output saved to: {output_file}")
-    """
-    if not df.empty:
-        write_star(df, output_file, overwrite=True)
-        msg = success_msg if success_msg else f"Output saved to: {output_file}"
-        print_success(msg)
-    else:
-        print_warning("No output particles generated")
-        sys.exit(1)
 
 # =============================================================================
 # ARGUMENT PARSERS
@@ -220,21 +200,6 @@ def add_predict_arguments(parser: argparse.ArgumentParser) -> None:
                        help='Max angle deviation within same tube in degrees (default: 20)')
     parser.add_argument('--lcc_keep_percentage', type=float, default=DEFAULT_LCC_KEEP_PERCENTAGE,
                        help=f'Percentage of LCC particles to keep (default: {DEFAULT_LCC_KEEP_PERCENTAGE})')
-          
-                       
-def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add predict-specific arguments."""
-    parser.add_argument('--n_cilia', type=int, default=None,
-                       help='Number of cilia in the tomogram')
-    parser.add_argument('--tilt_psi_threshold', type=float, default=10,
-                       help='Tilt/Psi threshold for cilia group (default: 10)')
-    parser.add_argument('--rot_threshold', type=float, default=8,
-                       help='Max rot angle deviation within same tube for doublet group (default: 8)')
-    parser.add_argument('--coord_threshold', type=float, default=900,
-                       help='Max spacial distance threshold for cilia classification (default: 900)')
-    parser.add_argument('--fit_method', default="ellipse", choices=["ellipse","simple"], help="Ordering method")
-    parser.add_argument('--enforce_9_doublets', type=bool, default="False", help="Forcing 9 doublets")
-
 
 # =============================================================================
 # PIPELINE STEPS
@@ -466,52 +431,6 @@ def run_prediction(df_input: pd.DataFrame, df_template: pd.DataFrame,
     
     return df_all[0]
 
-def run_sort(df_input: pd.DataFrame, 
-                  args: argparse.Namespace) -> pd.DataFrame:
-    """
-    Predict angles based on template matching.
-    
-    Parameters
-    ----------
-    df_input : pd.DataFrame
-        Input DataFrame with particles (fitted tubes)
-    args : argparse.Namespace
-        Command tube arguments
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with sorted doublet
-    """
-    
-    print("="*80)
-    print("GROUP CILIA AND SORT DOUBLET NUMBER")
-    print("="*80)
-    
-    print("This step is optional and be useful for Chlamydomonas.")
-    print("This step is NOT Tested yet for parallel cilia.")
-
-        
-    print_info(f"Sorting method: {args.fit_method}")
-    print_info(f"Tilt/Psi threshold: {args.tilt_psi_threshold}")
-    print_info(f"Distance Threshold: {args.coord_threshold} Å")
-    print_info(f"Rot threshold: {args.rot_threshold}")
-    if args.enforce_9_doublets:
-        print_info(f"Enforce 9 doublets: True")
-    
-
-    df_sorted = group_and_sort(
-        df=df_input,
-        angpix=args.angpix,
-        n_cilia=args.n_cilia,
-        tilt_psi_threshold=args.tilt_psi_threshold,
-        rot_threshold=args.rot_threshold,
-        enforce_9_doublets=args.enforce_9_doublets,
-        fit_method=args.fit_method,
-        out_png=args.out_png
-    )
-    return df_sorted
-    
 # =============================================================================
 # COMMAND HANDLERS
 # =============================================================================
@@ -523,7 +442,12 @@ def cmd_fit(args: argparse.Namespace) -> None:
     try:
         df_fitted = run_fitting(args.input, args)
         
-        save_output_or_exit(df_fitted, output_file)
+        if not df_fitted.empty:
+            write_star(df_fitted, output_file, overwrite=True)
+            print_success(f"Output saved to: {output_file}")
+        else:
+            print_warning("No output particles generated")
+            sys.exit(1)
             
     except Exception as e:
         print_error(f"{e}")
@@ -540,8 +464,13 @@ def cmd_clean(args: argparse.Namespace) -> None:
         validate_dataframe(df_input)
         
         df_cleaned = run_cleaning(df_input, args)
-                
-        save_output_or_exit(df_cleaned, output_file)
+        
+        if not df_cleaned.empty:
+            write_star(df_cleaned, output_file, overwrite=True)
+            print_success(f"Output saved to: {output_file}")
+        else:
+            print_warning("No output particles remaining after cleaning")
+            sys.exit(1)
             
     except Exception as e:
         print_error(f"{e}")
@@ -559,7 +488,12 @@ def cmd_connect(args: argparse.Namespace) -> None:
         
         df_connected = run_connection(df_input, args)
         
-        save_output_or_exit(df_connected, output_file)
+        if not df_connected.empty:
+            write_star(df_connected, output_file, overwrite=True)
+            print_success(f"Output saved to: {output_file}")
+        else:
+            print_warning("No output particles generated")
+            sys.exit(1)
             
     except Exception as e:
         print_error(f"{e}")
@@ -577,25 +511,12 @@ def cmd_predict(args: argparse.Namespace) -> None:
         
         df_predicted = run_prediction(df_input, df_template, args)
         
-        save_output_or_exit(df_predicted, output_file)
-            
-    except Exception as e:
-        print_error(f"{e}")
-        sys.exit(1)
-        
-def cmd_sort(args: argparse.Namespace) -> None:
-    """Execute sort subcommand."""
-    output_file = args.output or f"{os.path.splitext(args.input)[0]}_sorted.star"
-    
-    try:
-        # Read input files
-        df_input = read_star(args.input)
-        tomo = df_input['rlnTomoName'].iloc[0]
-        args.out_png = f"{tomo}.png"    
-        
-        df_sorted = run_sort(df_input, args)
-        
-        save_output_or_exit(df_sorted, output_file)
+        if not df_predicted.empty:
+            write_star(df_predicted, output_file, overwrite=True)
+            print_success(f"Output saved to: {output_file}")
+        else:
+            print_warning("No output particles generated")
+            sys.exit(1)
             
     except Exception as e:
         print_error(f"{e}")
@@ -668,7 +589,6 @@ Subcommands:
   clean     Remove overlapping tubes
   connect   Connect broken tube segments
   predict   Predict angles using template matching
-  sort   	Group cilia and sort doublet order
   pipeline  Run full pipeline (fit -> clean -> connect -> predict)
 
 Examples:
@@ -677,10 +597,8 @@ Examples:
   %(prog)s clean fitted.star --dist_thres 50
   %(prog)s connect cleaned.star --dist_extrapolate 1500 --overlap_thres 80 --min_part_per_tube 5
   %(prog)s predict connected.star --template input.star --neighbor_rad 100 --max_delta_deg 20
-  %(prog)s sort processed.star --n_cilia 2 --tilt_psi_threshold 10 --rot_threshold 8
-
   
-  # Run full pipeline (no sort)
+  # Run full pipeline
   %(prog)s pipeline input.star --angpix 14 --sample_step 82 \\
            --dist_thres 50 --dist_extrapolate 1500 --overlap_thres 80 \\
            --min_part_per_tube 5 --neighbor_rad 100 --template input.star
@@ -713,18 +631,11 @@ Examples:
     add_predict_arguments(predict_parser)
     predict_parser.set_defaults(func=cmd_predict)
     
-    # SORT subcommand
-    sort_parser = subparsers.add_parser('sort', help='Group cilia and sort doublet order')
-    add_common_arguments(sort_parser)
-    add_sort_arguments(sort_parser)
-    sort_parser.set_defaults(func=cmd_sort)
-    
     # PIPELINE subcommand
     pipeline_parser = subparsers.add_parser('pipeline', help='Run full pipeline')
     add_common_arguments(pipeline_parser)
     add_fit_arguments(pipeline_parser)
     add_clean_arguments(pipeline_parser)
-    add_predict_arguments(pipeline_parser)
     
     # Connection arguments for pipeline
     pipeline_parser.add_argument('--dist_extrapolate', type=float, required=True,
@@ -737,6 +648,9 @@ Examples:
                                 help='Distance scale factor per iteration (default: 1.5)')
     pipeline_parser.add_argument('--min_part_per_tube', type=int, default=5,
                                 help='Minimum particles per tube (default: 5)')
+    
+    # Prediction arguments for pipeline
+    add_predict_arguments(pipeline_parser)
     
     pipeline_parser.set_defaults(func=cmd_pipeline)
     

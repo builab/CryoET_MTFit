@@ -14,11 +14,12 @@ CryoET_MTFit/
 │   ├── connect.py      # Line connecting logic
 │   ├── view.py      	# Visualize star file
 │   ├── predict.py      # Generate proper angles from template
-│   ├── sort.py         # Sort cilia
+│   ├── sort.py         # Sort cilia order
 │   └── io.py           # I/O utilities
 └── scripts/
     ├── mt_fit.py       # CLI wrapper to fit, clean & connect
     ├── view_star_.py   # CLI wrapper to visualize star file
     ├── visualize_star_angles.py   # Visualize angles from star file
     ├── combine_mtstar2relionwarp.py   # Combine star files to a single file
+    ├── add_id_to_warpstar.py   # Add rlnHelicalTubeID, rlnCiliaGroup, rlnRandomSubset to warpstar
     └── mtfitchimerax.py     # ChimeraX interface of mt_fit.py pipeline only
