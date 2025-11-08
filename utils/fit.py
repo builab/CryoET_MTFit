@@ -18,7 +18,8 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-
+PRECOMPUTE_DISTANCE_THRESHOLD=3000
+EVALUATION_STEP_SIZE = 40.0 # In Angstrom
 
 def distance(p1: np.ndarray, p2: np.ndarray) -> float:
     """Calculate Euclidean distance between two points (2D or 3D)."""
@@ -136,7 +137,7 @@ def angle_evaluate(
     Returns:
         1 if curvature is acceptable, 0 otherwise.
     """
-    evaluation_step = 40 / angpix
+    evaluation_step = EVALUATION_STEP_SIZE / angpix
     step = integration_step
     
     def get_next_pos(val: float) -> Tuple[float, float]:
@@ -293,10 +294,10 @@ def seed_extension(
         return [], []
 
     # --- Curve Growth ---
-    max_iterations = 100  # Prevent infinite loops
+    MAX_ITERATIONS = 100  # Prevent infinite loops
     iteration = 0
     
-    while iteration < max_iterations:
+    while iteration < MAX_ITERATIONS:
         iteration += 1
         grew = False
         unassigned_indices = np.where(assigned_clusters == -1)[0]
@@ -350,7 +351,7 @@ def seed_extension(
             
             # Add all valid points at once
             if len(valid_indices) > 0:
-                cluster_indices.extend(valid_indices.tolist())
+                cluster_indices.extend(valid_indices)
                 assigned_clusters[valid_indices] = -2  # Provisional assignment
                 grew = True
 
@@ -442,7 +443,7 @@ def fit_curves(
 
     # Pre-compute 2D distance matrix for efficiency (if dataset is not too large)
     # Only compute if reasonable memory footprint (< ~10M distances)
-    use_precomputed_distances = total_number < 3000
+    use_precomputed_distances = total_number < PRECOMPUTE_DISTANCE_THRESHOLD
     dist_matrix_2d = None
     
     if use_precomputed_distances:

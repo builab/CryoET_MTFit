@@ -389,7 +389,7 @@ def iterative_fit_and_detect(particle_indices, angles, order=2, n_iterations=2):
     Performs iterative polynomial fitting and MAD outlier detection (2 steps).
     
     Returns:
-        Tuple: (final_fitted_angles, total_outliers_mask, final_rmse, final_poly_object)
+        Tuple: (final_fitted_angles, total_outliers_mask)
     """
     
     N = len(angles)
@@ -457,7 +457,7 @@ def smooth_angles(df):
     
     angle_names = ['rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi']
     
-    # NEW: Initialize counter
+    # Initialize counter
     total_outliers_corrected = 0 
 
     # --- Iterative Correction Loop ---
@@ -484,7 +484,7 @@ def smooth_angles(df):
 
         # 3. Extrapolation and Data Replacement
         if global_outlier_mask.any():
-            # NEW: Count outliers for this tube and add to total
+            # Count outliers for this tube and add to total
             outlier_count = global_outlier_mask.sum()
             total_outliers_corrected += outlier_count
             
@@ -500,7 +500,7 @@ def smooth_angles(df):
                 # Replace the values in the corrected DataFrame copy
                 df_corrected.loc[outlier_indices_original_df, angle] = extrapolated_values
 	
-    # NEW: Print summary
+    # Print summary
     print(f"  Total outlier found and corrected: {total_outliers_corrected}")
     
     return df_corrected

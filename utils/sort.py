@@ -15,8 +15,6 @@ from .io import validate_dataframe
 
 from scipy.linalg import lstsq
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
-from scipy.spatial.distance import pdist, squareform
-from scipy.cluster.hierarchy import linkage, fcluster
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -379,16 +377,6 @@ def plot_cross_section(cross_section_px, pixel_size_A, ellipse_params=None, outp
     else:
         plt.show()
 
-
-
-# ----------------------------- I/O and CLI -----------------------------
-
-def to_original_prefix(df, template_cols):
-    """Restore underscore prefix if input had it."""
-    if any(c.startswith("_rln") for c in template_cols):
-        rename = {c: f"_{c}" for c in df.columns if c.startswith("rln")}
-        return df.rename(columns=rename)
-    return df
     
 # ----------------------------- Main pipeline -----------------------------
 
@@ -751,13 +739,11 @@ def create_grouped_dataframe(df, doublet_assignments):
     
     # Create mapping from original tube ID to new values
     tube_id_mapping = {}
-    cilia_group_mapping = {}
     
     for orig_tube_id, (cilium_group, doublet_id) in doublet_assignments.items():
         # Calculate new tube ID: (CiliaGroup - 1) * 10 + DoubletID
         new_tube_id = (cilium_group - 1) * 10 + doublet_id
         tube_id_mapping[orig_tube_id] = new_tube_id
-        cilia_group_mapping[orig_tube_id] = cilium_group
     
     # Renumber rlnHelicalTubeID first
     output_df['rlnHelicalTubeID'] = output_df['rlnHelicalTubeID'].map(tube_id_mapping)

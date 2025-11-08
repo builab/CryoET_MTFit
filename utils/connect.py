@@ -46,21 +46,6 @@ class TubeInfo:
             'angpix': self.angpix
         }
 
-
-def euclidean_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """
-    Calculate Euclidean distance between two 3D points.
-    
-    Args:
-        p1: First point (3D array).
-        p2: Second point (3D array).
-    
-    Returns:
-        Euclidean distance.
-    """
-    return np.linalg.norm(p1 - p2)
-
-
 def extract_tube_info(
     df: pd.DataFrame,
     tube_id: int,
@@ -252,7 +237,7 @@ def assess_connection_compatibility(
     # Calculate direct endpoint distance
     endpoint1 = coords1[-1] if end1 == 'end' else coords1[0]
     endpoint2 = coords2[0] if end2 == 'start' else coords2[-1]
-    end_to_end_distance = euclidean_distance(endpoint1, endpoint2)
+    end_to_end_distance = np.linalg.norm(endpoint1 - endpoint2)
     
     # Prepare tube1 for extrapolation (reverse if connecting from start)
     if end1 == 'end':

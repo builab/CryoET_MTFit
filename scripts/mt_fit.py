@@ -78,48 +78,7 @@ def print_success(message: str) -> None:
 
 def print_error(message: str) -> None:
     """Print error message."""
-    print(f"[ERROR] {message}", file=sys.stderr)
-
-def parse_psi_range(psi_range_str: str) -> tuple:
-    """
-    Parse psi range string into (psi_min, psi_max, filter_psi).
-    
-    Args:
-        psi_range_str: String like "-30,30" or None
-    
-    Returns:
-        Tuple of (psi_min, psi_max, filter_psi)
-    """
-    if psi_range_str is None:
-        return 0.0, 180.0, False
-    
-    try:
-        parts = psi_range_str.split(',')
-        if len(parts) != 2:
-            raise ValueError("psi_range must be in format 'min,max'")
-        
-        psi_min = float(parts[0].strip())
-        psi_max = float(parts[1].strip())
-        
-        # Check if range covers everything (no filtering needed)
-        # Normalize angles to compare
-        def normalize_angle(angle):
-            return ((angle + 180) % 360) - 180
-        
-        psi_min_norm = normalize_angle(psi_min)
-        psi_max_norm = normalize_angle(psi_max)
-        
-        # If range is effectively [-180, 180] or [0, 180] with opposites, skip filtering
-        # For simplicity, just check if it's a 180° range
-        range_size = abs(psi_max_norm - psi_min_norm)
-        if range_size >= 180:
-            return psi_min, psi_max, False
-        
-        return psi_min, psi_max, True
-    
-    except ValueError as e:
-        raise ValueError(f"Invalid psi_range format: {psi_range_str}. {e}")
-        
+    print(f"[ERROR] {message}", file=sys.stderr)        
         
 def save_output_or_exit(df: pd.DataFrame, output_file: str, success_msg: str = None) -> None:
     """
@@ -233,7 +192,7 @@ def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--coord_threshold', type=float, default=900,
                        help='Max spacial distance threshold for cilia classification (default: 900)')
     parser.add_argument('--fit_method', default="ellipse", choices=["ellipse","simple"], help="Ordering method")
-    parser.add_argument('--enforce_9_doublets', type=bool, default="False", help="Forcing 9 doublets")
+    parser.add_argument('--enforce_9_doublets', action='store_true', help="Force exactly 9 doublets per cilium")
 
 
 # =============================================================================
@@ -400,7 +359,7 @@ def run_connection(
             print_info(f"Filtered out {tubes_removed} tubes with direction deviation more than {args.direction_dev} degrees")
             print_info(f"Final: {tubes_after} tubes, {len(df_final)} particles")
     else:
-        df_cleaned = df_connected.copy()
+        df_cleaned = df_connected
     		
 
     # Filter short tubes if requested
@@ -414,7 +373,7 @@ def run_connection(
             print_info(f"Filtered out {tubes_removed} tubes with < {args.min_part_per_tube} particles")
             print_info(f"Final: {tubes_after} tubes, {len(df_final)} particles")
     else:
-        df_final = df_connected
+        df_final = df_cleaned
     
     return df_final
 
@@ -537,7 +496,6 @@ def cmd_clean(args: argparse.Namespace) -> None:
     try:
         # Read input
         df_input = read_star(args.input)
-        validate_dataframe(df_input)
         
         df_cleaned = run_cleaning(df_input, args)
                 
@@ -555,7 +513,6 @@ def cmd_connect(args: argparse.Namespace) -> None:
     try:
         # Read input
         df_input = read_star(args.input)
-        validate_dataframe(df_input)
         
         df_connected = run_connection(df_input, args)
         
@@ -629,7 +586,6 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         
         # Load template for prediction
         df_template = read_star(args.template)
-        validate_dataframe(df_template)
         
         df_final = run_prediction(df_connected, df_template, args, step_num=4)
         

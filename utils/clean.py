@@ -273,7 +273,7 @@ def remove_tubes_by_id(
         Filtered DataFrame with specified tubes removed.
     """
     if not tube_ids_to_remove:
-        return df.copy()
+        return df
     
     df_filtered = df[~df['rlnHelicalTubeID'].isin(tube_ids_to_remove)].copy()
     
@@ -315,7 +315,7 @@ def filter_short_tubes(
         raise ValueError("min_particles must be a non-negative integer")
     
     if min_particles == 0:
-        return df.copy()
+        return df
     
     # Count particles per tube
     tube_counts = df.groupby('rlnHelicalTubeID').size()
@@ -337,13 +337,6 @@ def filter_short_tubes(
         print(f"  Removed {tubes_removed} tubes ({particles_removed} particles)")
     
     return df_filtered
-
-
-boxes_overlap_with_margin = lambda box1, box2, margin: (
-    BoundingBox(np.array([box1['min']])).overlaps_with_margin(
-        BoundingBox(np.array([box2['min']])), margin
-    ) if isinstance(box1, dict) else box1.overlaps_with_margin(box2, margin)
-)
 
     
 def filter_tubes_by_psi(df: pd.DataFrame, minAngle: float, maxAngle: float) -> pd.DataFrame:
@@ -408,7 +401,7 @@ def filter_tubes_by_psi(df: pd.DataFrame, minAngle: float, maxAngle: float) -> p
     
     print(f"  Total particles kept: {mask_combined.sum()} / {len(df)}")
     
-    return df[mask_combined].copy()
+    return df[mask_combined]
     
 
 def filter_by_direction(
