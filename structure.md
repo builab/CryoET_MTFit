@@ -22,4 +22,6 @@ CryoET_MTFit/
     ├── visualize_star_angles.py   # Visualize angles from star file
     ├── combine_mtstar2relionwarp.py   # Combine star files to a single file
     ├── add_id_to_warpstar.py   # Add rlnHelicalTubeID, rlnCiliaGroup, rlnRandomSubset to warpstar
+    ├── batch_mt_fit.sh   # Batch script for mt_fit.py pipeline
+    ├── batch_sort.sh   # Batch script for mt_fit.py sorting
     └── mtfitchimerax.py     # ChimeraX interface of mt_fit.py pipeline only

@@ -9,15 +9,35 @@ Geom/Sort for ReLAX – cross-section extraction, ellipse fit, ordering, and plo
 import argparse
 import numpy as np
 import pandas as pd
+import json
+import datetime
 import matplotlib.pyplot as plt
 
 from .io import validate_dataframe
 
+from collections import defaultdict
+from typing import Dict, Tuple, Optional
 from scipy.linalg import lstsq
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
 import warnings
 warnings.filterwarnings('ignore')
 
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """
+    A custom JSON encoder that handles NumPy integer types by converting 
+    them to standard Python integers.
+    """
+    def default(self, obj):
+        # Check if the object is any NumPy integer type
+        if isinstance(obj, np.integer):
+            return int(obj)
+        # Check for NumPy floats, just in case (e.g., np.float64)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        # Let the base class default method handle other types
+        return super().default(obj)
+        
 # ----------------------------- Basic utilities -----------------------------
 
 def normalize_angle(angle):
@@ -758,7 +778,15 @@ def create_grouped_dataframe(df, doublet_assignments):
     
     return output_df, tube_id_mapping
 
-def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_threshold=900, rot_threshold=8, enforce_9_doublets=False):
+def group_cilia_and_doublets(
+    df, 
+    n_cilia=None, 
+    tilt_psi_threshold=10, 
+    coord_threshold=900, 
+    rot_threshold=8, 
+    enforce_9_doublets=False,
+    export_json=None  # ADD THIS PARAMETER
+):
     """
     Main function to classify ciliary tubes and output results.
     
@@ -768,8 +796,9 @@ def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_thre
     n_cilia : int or None, expected number of cilia (if None, auto-detect)
     tilt_psi_threshold : float, angular threshold for Tilt/Psi similarity (degrees)
     coord_threshold : float, spatial distance threshold (Angstroms)
-    rot_threshold : float, angular threshold for Rot similarity (degrees, default 5)
+    rot_threshold : float, angular threshold for Rot similarity (degrees, default 8)
     enforce_9_doublets : bool, force exactly 9 doublets per cilium
+    export_json : str or None, path to export grouping as JSON (default: None)
     """
     print("="*80)
     print("CILIA TUBE CLASSIFICATION")
@@ -787,10 +816,12 @@ def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_thre
     print("\n" + "-"*80)
     print("STEP 1: Classifying tubes into cilia groups")
     print("-"*80)
-    cilia_groups, cilia_labels = classify_cilia_groups(tube_stats, 
-                                                       n_cilia,
-                                                       tilt_psi_threshold, 
-                                                       coord_threshold)
+    cilia_groups, cilia_labels = classify_cilia_groups(
+        tube_stats, 
+        n_cilia,
+        tilt_psi_threshold, 
+        coord_threshold
+    )
     
     print(f"\nFound {len(cilia_groups)} cilia group(s):")
     for cilium_id, tubes in cilia_groups.items():
@@ -800,11 +831,13 @@ def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_thre
     print("\n" + "-"*80)
     print("STEP 2: Classifying doublet microtubules within each cilium")
     print("-"*80)
-    doublet_assignments = classify_doublet_microtubules(tube_stats, 
-                                                        cilia_groups, 
-                                                        rot_threshold,
-                                                        enforce_9_doublets)
-    
+    doublet_assignments = classify_doublet_microtubules(
+        tube_stats, 
+        cilia_groups, 
+        rot_threshold,
+        enforce_9_doublets
+    )
+        
     # Print final results
     print("\n" + "="*80)
     print("FINAL CLASSIFICATION RESULTS")
@@ -822,22 +855,15 @@ def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_thre
         
         for doublet_key, tube_list in sorted(doublets_in_cilium.items()):
             print(f"  {doublet_key}: Tubes {tube_list}")
-    
-    # Create summary results dataframe
-    results = pd.DataFrame({
-        'OriginalTubeID': list(doublet_assignments.keys()),
-        'CiliumGroup': [doublet_assignments[tid][0] for tid in doublet_assignments.keys()],
-        'DoubletNumber': [doublet_assignments[tid][1] for tid in doublet_assignments.keys()],
-        'NewTubeID': [(doublet_assignments[tid][0] - 1) * 10 + doublet_assignments[tid][1] 
-                      for tid in doublet_assignments.keys()],
-        'MedianRot': [tube_stats.loc[tid, 'rlnAngleRot'] for tid in doublet_assignments.keys()],
-        'MedianTilt': [tube_stats.loc[tid, 'rlnAngleTilt'] for tid in doublet_assignments.keys()],
-        'MedianPsi': [tube_stats.loc[tid, 'rlnAnglePsi'] for tid in doublet_assignments.keys()],
-    })
-    
-    print("\n" + "="*80)
-    print("\nResults summary:")
-    print(results.to_string(index=False))
+        
+    # ========== ADD THIS BLOCK: Export JSON if requested ==========
+    if export_json:        
+        export_automatic_grouping(
+            doublet_assignments=doublet_assignments,
+            output_json=export_json,
+            method='automatic'
+        )
+    # ==============================================================
     
     # Create output dataframe with modified columns
     print("\n" + "-"*80)
@@ -858,6 +884,521 @@ def group_cilia_and_doublets(df, n_cilia=None, tilt_psi_threshold=10, coord_thre
         
     return output_df
 
+def export_automatic_grouping(
+    doublet_assignments: Dict[int, Tuple[int, int]],
+    output_json: str,
+    method: str = 'automatic'
+) -> None:
+    """
+    Export automatic grouping results to JSON file for record keeping.
+    ... [docstring content remains the same] ...
+    """
+    
+    # Group tubes by cilium
+    cilia_groups = defaultdict(lambda: {'tubes': [], 'doublet_order': []})
+    
+    # NOTE: The keys (tube_id) and values (cilium_id, doublet_num) 
+    # are likely the source of the numpy.int64.
+    for tube_id in sorted(doublet_assignments.keys()):
+        cilium_id, doublet_num = doublet_assignments[tube_id]
+        cilia_groups[cilium_id]['tubes'].append(tube_id)
+        cilia_groups[cilium_id]['doublet_order'].append(doublet_num)
+    
+    # Create JSON structure
+    output_data = {}
+    
+    # Add metadata
+    output_data['_metadata'] = {
+        'timestamp': datetime.datetime.now().isoformat(),
+        'method': method,
+        'n_cilia': len(cilia_groups),
+        'n_tubes': len(doublet_assignments),
+        'note': 'Automatically generated grouping. Can be edited and reused for manual grouping.'
+    }
+    
+    # Add cilium data
+    for cilium_id in sorted(cilia_groups.keys()):
+        cilium_key = f"cilium_{cilium_id}"
+        output_data[cilium_key] = {
+            'tubes': cilia_groups[cilium_id]['tubes'],
+            'doublet_order': cilia_groups[cilium_id]['doublet_order']
+        }
+    
+    # 2. FIX: Write to file using the custom encoder
+    with open(output_json, 'w') as f:
+        # Pass the custom encoder class to the 'cls' argument
+        json.dump(output_data, f, indent=2, cls=NumpyJSONEncoder)
+    
+    print(f"\n✓ Automatic grouping exported to: {output_json}")
+    print(f"  Method: {method}")
+    print(f"  Cilia: {len(cilia_groups)}")
+    print(f"  Tubes: {len(doublet_assignments)}")
+    print(f"\nThis file can be:")
+    print(f"  1. Used as a record of the automatic grouping")
+    print(f"  2. Edited manually and reused with --manual flag")
+    print(f"  3. Shared with collaborators for reproducibility")
+
+def load_manual_groups_json(json_file: str) -> Dict[int, Tuple[int, int]]:
+    """
+    Load manual grouping from JSON file.
+    
+    Supports both 1-to-1 and many-to-1 mapping (multiple tubes can share same doublet).
+    
+    JSON Format (1-to-1):
+    {
+      "cilium_1": {
+        "tubes": [1, 5, 9, 13, 17, 21, 25, 29, 33],
+        "doublet_order": [1, 2, 3, 4, 5, 6, 7, 8, 9]
+      }
+    }
+    
+    JSON Format (many-to-1, e.g., 10 tubes in 9 doublets):
+    {
+      "cilium_1": {
+        "tubes": [1, 5, 9, 13, 17, 21, 25, 29, 33, 37],
+        "doublet_order": [1, 2, 3, 3, 4, 5, 6, 7, 8, 9]
+      }
+    }
+    
+    Parameters:
+    -----------
+    json_file : str
+        Path to JSON file with manual grouping specification
+    
+    Returns:
+    --------
+    dict : mapping {original_tube_id: (cilium_group, doublet_number)}
+    
+    Raises:
+    -------
+    FileNotFoundError : if JSON file doesn't exist
+    ValueError : if JSON format is invalid
+    """
+    try:
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Manual grouping file not found: {json_file}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format in {json_file}: {e}")
+    
+    assignments = {}
+    
+    for cilium_name, info in data.items():
+        # Skip instruction/comment keys
+        if cilium_name.startswith('_'):
+            continue
+            
+        # Extract cilium ID from key (e.g., "cilium_1" -> 1)
+        if not cilium_name.startswith('cilium_'):
+            raise ValueError(f"Invalid cilium key: {cilium_name}. Must start with 'cilium_'")
+        
+        try:
+            cilium_id = int(cilium_name.split('_')[1])
+        except (IndexError, ValueError):
+            raise ValueError(f"Invalid cilium key format: {cilium_name}. Expected format: 'cilium_N'")
+        
+        # Validate required fields
+        if 'tubes' not in info:
+            raise ValueError(f"Missing 'tubes' field for {cilium_name}")
+        
+        tubes = info['tubes']
+        
+        # If doublet_order not specified, use sequential order (1-to-1)
+        if 'doublet_order' in info:
+            order = info['doublet_order']
+            
+            # Validate lengths match (required for explicit doublet_order)
+            if len(tubes) != len(order):
+                raise ValueError(
+                    f"{cilium_name}: Number of tubes ({len(tubes)}) must match "
+                    f"doublet_order length ({len(order)})"
+                )
+        else:
+            order = list(range(1, len(tubes) + 1))
+            print(f"  Note: No doublet_order specified for {cilium_name}, using sequential 1-to-1 mapping")
+        
+        # Validate doublet numbers are in valid range
+        if not all(1 <= d <= 10 for d in order):
+            raise ValueError(
+                f"{cilium_name}: Doublet numbers must be between 1 and 10, got {order}"
+            )
+        
+        # Check for duplicate tube IDs across cilia
+        for tube_id in tubes:
+            if tube_id in assignments:
+                raise ValueError(
+                    f"Tube {tube_id} is assigned to multiple cilia "
+                    f"(at least {cilium_name} and another)"
+                )
+        
+        # Detect many-to-1 mapping
+        unique_doublets = len(set(order))
+        if unique_doublets < len(tubes):
+            print(f"  Note: {cilium_name} has many-to-1 mapping: "
+                  f"{len(tubes)} tubes mapped to {unique_doublets} doublets")
+            
+            # Show which doublets have multiple tubes
+            from collections import Counter
+            doublet_counts = Counter(order)
+            for doublet_num, count in sorted(doublet_counts.items()):
+                if count > 1:
+                    tube_ids = [tubes[i] for i, d in enumerate(order) if d == doublet_num]
+                    print(f"    Doublet {doublet_num}: {count} tubes {tube_ids}")
+        
+        # Create assignments
+        for tube_id, doublet_num in zip(tubes, order):
+            assignments[tube_id] = (cilium_id, doublet_num)
+    
+    return assignments
+
+
+def validate_manual_assignments(df: pd.DataFrame, assignments: Dict[int, Tuple[int, int]]) -> None:
+    """
+    Validate that manual assignments are compatible with the dataframe.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with particles
+    assignments : dict
+        Manual tube assignments
+    
+    Raises:
+    -------
+    ValueError : if validation fails
+    """
+    # Get actual tube IDs from dataframe
+    actual_tubes = set(df['rlnHelicalTubeID'].unique())
+    assigned_tubes = set(assignments.keys())
+    
+    # Check for tubes in JSON that don't exist in data
+    extra_tubes = assigned_tubes - actual_tubes
+    if extra_tubes:
+        raise ValueError(
+            f"Manual grouping contains tube IDs not found in data: {sorted(extra_tubes)}\n"
+            f"Available tubes: {sorted(actual_tubes)}"
+        )
+    
+    # Check for tubes in data not assigned in JSON
+    missing_tubes = actual_tubes - assigned_tubes
+    if missing_tubes:
+        raise ValueError(
+            f"Manual grouping missing tube IDs present in data: {sorted(missing_tubes)}\n"
+            f"All tubes must be assigned to a cilium group."
+        )
+    
+    print(f"  ✓ Validated {len(assigned_tubes)} tube assignments")
+
+
+def apply_manual_groups(df: pd.DataFrame, assignments: Dict[int, Tuple[int, int]]) -> pd.DataFrame:
+    """
+    Apply manual tube grouping to dataframe.
+    
+    Tubes assigned to the same (cilium_group, doublet_number) will be assigned 
+    the SAME new rlnHelicalTubeID, thereby combining them into a single group.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input DataFrame with particles
+    assignments : dict
+        Mapping {original_tube_id: (cilium_group, doublet_number)}
+    
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with updated rlnHelicalTubeID and rlnCiliaGroup columns
+    """
+    
+    output_df = df.copy()
+    
+    # Create new tube ID mapping
+    # This dictionary will map original tube IDs to their NEW (shared) HelicalTubeID.
+    tube_id_mapping = {}
+    
+    print("\nℹ️ Applying Manual Grouping: Many-to-one mappings will result in shared IDs.")
+    
+    for tube_id, (cilium_group, doublet_id) in assignments.items():
+        # --- MODIFIED LOGIC START ---
+        
+        # Calculate the new rlnHelicalTubeID. 
+        # This ID is based ONLY on the cilium and doublet number, 
+        # meaning all tubes assigned here will get the same ID.
+        # ID calculation: (CiliumGroup - 1) * 10 + DoubletNumber
+        # This formula ensures IDs are unique across different (Cilium, Doublet) pairs.
+        new_tube_id = (cilium_group - 1) * 10 + doublet_id
+        
+        tube_id_mapping[tube_id] = new_tube_id
+        
+        # --- MODIFIED LOGIC END ---
+
+    # Apply mapping
+    # This will replace the original rlnHelicalTubeID (particle-level) with the 
+    # new group ID (doublet-level).
+    output_df['rlnHelicalTubeID'] = output_df['rlnHelicalTubeID'].map(tube_id_mapping)
+    
+    # Add rlnCiliaGroup column
+    # The new CiliaGroup is derived directly from the new HelicalTubeID:
+    # CiliaGroup = floor((HelicalTubeID - 1) / 10) + 1
+    output_df['rlnCiliaGroup'] = output_df['rlnHelicalTubeID'].apply(
+        lambda x: ((x - 1) // 10) + 1
+    )
+    
+    # Sort by tube ID and then by Y coordinate for consistency
+    output_df = output_df.sort_values(
+        by=['rlnHelicalTubeID', 'rlnCoordinateY'],  
+        ascending=[True, True]
+    ).reset_index(drop=True)
+    
+    print(f"✓ Manual grouping applied to {len(output_df)} particles.")
+    
+    return output_df
+
+def print_manual_grouping_summary(assignments: Dict[int, Tuple[int, int]]) -> None:
+    """
+    Print a formatted summary of manual tube grouping, reflecting the 
+    new grouping logic where tubes assigned to the same doublet receive 
+    the SAME output ID (no offset).
+    
+    Parameters:
+    -----------
+    assignments : dict
+        Mapping {original_tube_id: (cilium_group, doublet_number)}
+    """
+    
+    print("\n" + "="*80)
+    print("MANUAL GROUPING SUMMARY")
+    print("="*80)
+    
+    # Group by cilium
+    cilia = defaultdict(list)
+    # Also track doublet usage for many-to-1 detection
+    doublet_usage = defaultdict(list)
+    
+    for tube_id, (cilium_id, doublet_num) in assignments.items():
+        # Store for printing
+        cilia[cilium_id].append((tube_id, doublet_num))
+        # Store for checking many-to-one
+        doublet_usage[(cilium_id, doublet_num)].append(tube_id)
+    
+    # Print each cilium
+    for cilium_id in sorted(cilia.keys()):
+        # Sort by doublet, then tube
+        tubes = sorted(cilia[cilium_id], key=lambda x: (x[1], x[0])) 
+        print(f"\nCilium {cilium_id}:")
+        
+        # Group by doublet for clearer display
+        doublet_groups = defaultdict(list)
+        for tube_id, doublet_num in tubes:
+            doublet_groups[doublet_num].append(tube_id)
+        
+        for doublet_num in sorted(doublet_groups.keys()):
+            tube_ids = doublet_groups[doublet_num]
+            
+            # Calculate the SHARED new ID once for this doublet group
+            new_tube_id = (cilium_id - 1) * 10 + doublet_num
+            
+            if len(tube_ids) == 1:
+                # 1-to-1 mapping
+                tube_id = tube_ids[0]
+                print(f"  Doublet {doublet_num:2d}: Tube {tube_id:3d} → New ID {new_tube_id:3d}")
+            else:
+                # Many-to-1 mapping
+                # Tubes are now COMBINED under a single ID
+                
+                # Format tube IDs for a concise list
+                tubes_list_str = ", ".join(map(str, tube_ids))
+                
+                print(f"  Doublet {doublet_num:2d}: {len(tube_ids)} tubes ({tubes_list_str})")
+                print(f"    ↳ ALL tubes assigned New ID **{new_tube_id:3d}** (Combined Group)")
+
+    print("\n" + "="*80)
+    
+    # Print warning/note about the COMBINED grouping
+    has_many_to_one = any(len(tubes) > 1 for tubes in doublet_usage.values())
+    if has_many_to_one:
+        print("\nℹ️ Note: Many-to-1 mappings detected (multiple tubes per doublet).")
+        print("  All tubes in a many-to-one mapping are assigned the **same** New ID.")
+        print("  This means the particles from these tubes will be combined into one group.")
+        print("="*80)
+
+
+def manual_group_and_sort(
+    df: pd.DataFrame,
+    manual_json: str,
+    angpix: float,
+    fit_method: str = 'ellipse',
+    out_png: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Main function for manual grouping and sorting of ciliary tubes.
+    
+    This function:
+    1. Loads manual grouping from JSON file
+    2. Validates assignments against input data
+    3. Applies manual grouping (renumbers tube IDs)
+    4. Optionally sorts doublets within each cilium using ellipse fitting
+    5. Optionally generates visualization plots
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with particle coordinates and tube IDs
+    manual_json : str
+        Path to JSON file with manual grouping specification
+    angpix : float
+        Pixel size in Angstroms
+    fit_method : str, optional
+        Method for sorting doublets: 'ellipse' or 'simple' (default: 'ellipse')
+        Only used if you want to re-sort within the manually grouped cilia
+    out_png : str, optional
+        Output PNG file for visualization (default: None)
+    
+    Returns:
+    --------
+    pd.DataFrame
+        Processed dataframe with updated tube IDs and cilium groups
+    
+    Example JSON format:
+    -------------------
+    {
+      "cilium_1": {
+        "tubes": [1, 5, 9, 13, 17, 21, 25, 29, 33],
+        "doublet_order": [1, 2, 3, 4, 5, 6, 7, 8, 9]
+      },
+      "cilium_2": {
+        "tubes": [2, 6, 10, 14, 18, 22, 26, 30, 34]
+      }
+    }
+    
+    Usage:
+    ------
+    df_sorted = manual_group_and_sort(
+        df=input_df,
+        manual_json='manual_groups.json',
+        angpix=14.0,
+        fit_method='ellipse',
+        out_png='output.png'
+    )
+    """
+    print("\n" + "="*80)
+    print("MANUAL TUBE GROUPING AND SORTING")
+    print("="*80)
+    print(f"  JSON file: {manual_json}")
+    print(f"  Pixel size: {angpix} Å")
+    print(f"  Fit method: {fit_method}")
+    
+    # Step 1: Load manual grouping
+    print("\n[1/4] Loading manual grouping from JSON...")
+    try:
+        assignments = load_manual_groups_json(manual_json)
+    except Exception as e:
+        raise ValueError(f"Failed to load manual grouping: {e}")
+    
+    n_cilia = len(set(cil_id for cil_id, _ in assignments.values()))
+    print(f"  ✓ Loaded grouping for {n_cilia} cilia, {len(assignments)} tubes")
+    
+    # Step 2: Validate assignments
+    print("\n[2/4] Validating manual assignments...")
+    validate_manual_assignments(df, assignments)
+    
+    # Step 3: Apply manual grouping
+    print("\n[3/4] Applying manual grouping...")
+    df_grouped = apply_manual_groups(df, assignments)
+    print(f"  ✓ Grouped {len(df_grouped)} particles into {n_cilia} cilia")
+    
+    # Print summary
+    print_manual_grouping_summary(assignments)
+    
+    # Step 4: Optional - Sort doublets within each cilium using geometric methods
+    # Note: This step can be skipped if doublet_order is already specified correctly
+    print("\n[4/4] Sorting doublets (optional geometric refinement)...")
+    print("  Note: Since doublet order is manually specified, geometric sorting is skipped.")
+    print("  If you want to re-sort using ellipse fitting, use sort_doublet_order() separately.")
+    
+    df_output = df_grouped
+    
+    # Generate plot if requested
+    if out_png:
+        print(f"\n[Plotting] Generating visualization...")
+        # You can add plotting here if needed
+        # For now, we skip plotting in manual mode since the order is user-defined
+        print(f"  Note: Plotting skipped in manual mode. Use automatic mode for plots.")
+    
+    print("\n" + "="*80)
+    print("MANUAL GROUPING COMPLETE")
+    print("="*80)
+    print(f"  Output: {len(df_output)} particles")
+    print(f"  Cilia: {df_output['rlnCiliaGroup'].nunique()}")
+    print(f"  Tubes: {df_output['rlnHelicalTubeID'].nunique()}")
+    print("="*80 + "\n")
+    
+    return df_output
+
+
+def export_grouping_template(df: pd.DataFrame, output_json: str) -> None:
+    """
+    Export a template JSON file for manual grouping based on current tube IDs.
+    
+    This is helpful to generate a starting point that users can edit.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with tube IDs
+    output_json : str
+        Path to output JSON template file
+    
+    Example:
+    --------
+    # Generate template for manual editing
+    export_grouping_template(df, 'manual_groups_template.json')
+    # Then edit manual_groups_template.json to assign tubes to cilia
+    """
+    tube_ids = sorted(df['rlnHelicalTubeID'].unique())
+    
+    # Create template with all tubes in cilium_1 by default
+    template = {
+        "cilium_1": {
+            "tubes": tube_ids,
+            "doublet_order": list(range(1, len(tube_ids) + 1))
+        }
+    }
+    
+    # Add comment with instructions
+    template["_instructions"] = {
+        "note": "Edit this file to group tubes into cilia",
+        "format": {
+            "cilium_N": {
+                "tubes": "List of original tube IDs for this cilium",
+                "doublet_order": "Optional: Doublet numbers 1-9 for each tube (omit for sequential)"
+            }
+        },
+        "example": {
+            "cilium_1": {
+                "tubes": [1, 5, 9, 13, 17, 21, 25, 29, 33],
+                "doublet_order": [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            },
+            "cilium_2": {
+                "tubes": [2, 6, 10, 14, 18, 22, 26, 30, 34],
+                "doublet_order": [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            }
+        }
+    }
+    
+    with open(output_json, 'w') as f:
+        json.dump(template, f, indent=2)
+    
+    print(f"\n✓ Template exported to: {output_json}")
+    print(f"  Found {len(tube_ids)} tubes: {tube_ids}")
+    print(f"\nEdit this file to:")
+    print(f"  1. Split tubes into multiple cilia (cilium_1, cilium_2, etc.)")
+    print(f"  2. Specify doublet order (1-9) for each cilium")
+    print(f"  3. Remove the '_instructions' section before using")
+
+
+
 
 def group_and_sort(
     df: pd.DataFrame,
@@ -869,15 +1410,28 @@ def group_and_sort(
     enforce_9_doublets: bool=False,
     fit_method: str='ellipse',
     out_png: str=None,
+    export_json: str=None  # ADD THIS PARAMETER
 ) -> pd.DataFrame:
+    """
+    Main entry point for grouping and sorting.
+    
+    Parameters:
+    -----------
+    export_json : str, optional
+        Path to export automatic grouping as JSON for record keeping
+    """
 
     # Run group cilia
-    grouped_df = group_cilia_and_doublets(df=df, 
-                                           n_cilia=n_cilia,
-                                           tilt_psi_threshold=tilt_psi_threshold,
-                                           coord_threshold=coord_threshold,
-                                           rot_threshold=rot_threshold,
-                                           enforce_9_doublets=enforce_9_doublets)
+    grouped_df = group_cilia_and_doublets(
+        df=df, 
+        n_cilia=n_cilia,
+        tilt_psi_threshold=tilt_psi_threshold,
+        coord_threshold=coord_threshold,
+        rot_threshold=rot_threshold,
+        enforce_9_doublets=enforce_9_doublets,
+        export_json=export_json  # PASS THE PARAMETER
+    )
+    
     # Run sort
     sorted_df = sort_doublet_order(
         df=grouped_df,

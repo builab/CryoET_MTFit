@@ -1,5 +1,6 @@
 - Test with data
 - Fit with spline line for more accurate? (Future version)
+- Generate json or specific output line so we can use a batch function for processing.
 - For the tip, perhaps a directional filter (the majority) will work better
 
 Less priorty
@@ -36,4 +37,10 @@ v0.9.9
  - implement doublet sorting
  - add_id_to_warpstar.py for better processing
  - combine_mtstarfiles.py for combine everything for warp extraction
+ 
+v.0.9.10
+ - Implement json export
+ - Implement manual sort
+ - Implement batch_mt_fit.sh
+
 

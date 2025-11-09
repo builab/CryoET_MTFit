@@ -193,7 +193,13 @@ def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
                        help='Max spacial distance threshold for cilia classification (default: 900)')
     parser.add_argument('--fit_method', default="ellipse", choices=["ellipse","simple"], help="Ordering method")
     parser.add_argument('--enforce_9_doublets', action='store_true', help="Force exactly 9 doublets per cilium")
-
+    parser.add_argument('--export-json', type=str, metavar='FILE',
+                       help='Export automatic grouping to JSON file for record keeping')
+    
+    # Manual grouping options (mutually exclusive)
+    manual_group = parser.add_mutually_exclusive_group()
+    manual_group.add_argument('--manual', type=str, metavar='FILE',
+                       help='Manual grouping file (JSON format)')
 
 # =============================================================================
 # PIPELINE STEPS
@@ -425,8 +431,7 @@ def run_prediction(df_input: pd.DataFrame, df_template: pd.DataFrame,
     
     return df_all[0]
 
-def run_sort(df_input: pd.DataFrame, 
-                  args: argparse.Namespace) -> pd.DataFrame:
+def run_sort(df_input: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     """
     Predict angles based on template matching.
     
@@ -435,7 +440,7 @@ def run_sort(df_input: pd.DataFrame,
     df_input : pd.DataFrame
         Input DataFrame with particles (fitted tubes)
     args : argparse.Namespace
-        Command tube arguments
+        Command line arguments
         
     Returns
     -------
@@ -449,7 +454,6 @@ def run_sort(df_input: pd.DataFrame,
     
     print("This step is optional and be useful for Chlamydomonas.")
     print("This step is NOT Tested yet for parallel cilia.")
-
         
     print_info(f"Sorting method: {args.fit_method}")
     print_info(f"Tilt/Psi threshold: {args.tilt_psi_threshold}")
@@ -458,6 +462,10 @@ def run_sort(df_input: pd.DataFrame,
     if args.enforce_9_doublets:
         print_info(f"Enforce 9 doublets: True")
     
+    # ADD: Check if export_json is requested
+    export_json = getattr(args, 'export_json', None)
+    if export_json:
+        print_info(f"Will export grouping to: {export_json}")
 
     df_sorted = group_and_sort(
         df=df_input,
@@ -467,8 +475,10 @@ def run_sort(df_input: pd.DataFrame,
         rot_threshold=args.rot_threshold,
         enforce_9_doublets=args.enforce_9_doublets,
         fit_method=args.fit_method,
-        out_png=args.out_png
+        out_png=args.out_png,
+        export_json=export_json  # ADD THIS
     )
+    
     return df_sorted
     
 # =============================================================================
@@ -545,12 +555,32 @@ def cmd_sort(args: argparse.Namespace) -> None:
     output_file = args.output or f"{os.path.splitext(args.input)[0]}_sorted.star"
     
     try:
-        # Read input files
         df_input = read_star(args.input)
         tomo = df_input['rlnTomoName'].iloc[0]
-        args.out_png = f"{tomo}.png"    
         
-        df_sorted = run_sort(df_input, args)
+        # Generate JSON filename if export requested but no name given
+        if hasattr(args, 'export_json') and args.export_json:
+            json_file = args.export_json
+        else:
+            # Auto-generate JSON filename based on input
+            json_file = f"{os.path.splitext(args.input)[0]}_grouping.json"
+            args.export_json = json_file if not hasattr(args, 'manual') or not args.manual else None
+        
+        # Check for manual grouping
+        if hasattr(args, 'manual') and args.manual:
+            print("Using manual grouping from JSON file...")
+            from utils.sort import manual_group_and_sort
+            df_sorted = manual_group_and_sort(
+                df=df_input,
+                manual_json=args.manual,
+                angpix=args.angpix,
+                fit_method=args.fit_method,
+                out_png=f"{tomo}.png"
+            )
+        else:
+            # Automatic grouping
+            args.out_png = f"{tomo}.png"
+            df_sorted = run_sort(df_input, args)
         
         save_output_or_exit(df_sorted, output_file)
             
@@ -597,9 +627,8 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
             print("PIPELINE COMPLETE")
             print("="*80)
             print_summary("Final Output", [
-                f"File: {output_file}",
-                f"Tubes: {df_final['rlnHelicalTubeID'].nunique()}",
-                f"Particles: {len(df_final)}"
+                f"File, Tubes, Particles,Orientation(PsiAngle)",
+                f"{output_file},{df_final['rlnHelicalTubeID'].nunique()},{len(df_final)},{df_final['rlnAnglePsi'].median():.2f}"
             ])
         else:
             print_warning("Pipeline produced no output particles")
