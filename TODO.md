@@ -3,6 +3,10 @@
 - Generate json or specific output line so we can use a batch function for processing.
 - For the tip, perhaps a directional filter (the majority) will work better
 
+- Average: 
+python to write star file of each cilia
+classification of star 
+
 Less priorty
 - Do a basic rlnAnglePsi and rlnAngleRot for microtubule prediction (no template).
 - Later on, need to check for polarity (does the 14PF template get right 13PF polarity)
@@ -43,4 +47,6 @@ v.0.9.10
  - Implement manual sort
  - Implement batch_mt_fit.sh
 
-
+v.0.9.11
+ - Generate average of each cilia
+ 
