@@ -69,6 +69,14 @@ mt_fit.py predict CCDC147C_001_particles_fitted_cleaned_connected.star --angpix 
 mt_fit.py pipeline CCDC147C_001_particles.star --angpix 14 --sample_step 82 --min_seed 6 --poly_order 3 --dist_thres 50 --dist_extrapolate 2000 --overlap_thres 100 --neighbor_rad 100 --template CCDC147C_001_particles.star 
 ```
 
+For batch connection, we need to have all the star files in a folder "input". Navigate into the folder, edit the batch_mt_fit.sh for the right parameters and then run:
+```bash
+batch_mt_fit.sh
+```
+
+At the end check mt_fit_summary.csv for summary.
+
+
 ### Sort
 ```bash
 mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --n_cilia 2 --rot_threshold 8

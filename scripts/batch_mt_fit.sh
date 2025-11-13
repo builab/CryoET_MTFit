@@ -47,7 +47,7 @@ for STAR_FILE in *.star; do
     
     if [ $EXIT_CODE -eq 0 ]; then
         SUCCESS_STATUS="YES"
-        echo "-> Fitting Succeeded. Result: File,Number_of_Tubes,Number_of_particles,MedianPsi"
+        echo "  -> Fitting Succeeded. Result: File,Number_of_Tubes,Number_of_particles,MedianPsi"
         echo "                              $FIT_RESULT_VALUE"
 
         # Log the result to the summary file

@@ -5,6 +5,7 @@
 Add rlnHelicalTubeID to star file exported using Warp using original file.
 1. Add rlnHelicalTubeID based on the nearest points from original file.
 2. Also add rlnRandomSubset grouped based on rlnHelicalTubeID to avoid inflated resolution.
+3. Add rlnOriginalIndex reflecting the position along the tube (sorted by Z coordinate).
 
 Tested good.
 @Builab 2025
@@ -74,22 +75,48 @@ def get_pixel_size_from_optics(star_data) -> float:
     return None
 
 
+def create_template_position_map(template_df: pd.DataFrame) -> dict:
+    """
+    Create a mapping from (tomoName, tubeID, particle_index) to position index along tube.
+    Assumes particles are already sorted by Y coordinate within each tube in the template file.
+    
+    Args:
+        template_df: DataFrame with template particles (pre-sorted by Y coordinate)
+    
+    Returns:
+        Dictionary mapping (tomoName, tubeID, template_df_index) -> position_index (1-based)
+    """
+    position_map = {}
+    
+    # Group by tomogram and tube
+    for (tomo_name, tube_id), group in template_df.groupby(['rlnTomoName', 'rlnHelicalTubeID']):
+        # Use existing order (already sorted by Y coordinate)
+        # Assign position indices (1-based)
+        for position_idx, original_idx in enumerate(group.index, start=1):
+            position_map[(tomo_name, tube_id, original_idx)] = position_idx
+    
+    return position_map
+
+
 def match_particles_by_tomogram(warp_df: pd.DataFrame, template_df: pd.DataFrame,
-                                  warp_coords: np.ndarray, template_coords: np.ndarray) -> pd.Series:
+                                  warp_coords: np.ndarray, template_coords: np.ndarray,
+                                  position_map: dict) -> tuple:
     """
     For each particle in warp_df, find the nearest particle in template_df
-    within the same tomogram and return the corresponding rlnHelicalTubeID.
+    within the same tomogram and return the corresponding rlnHelicalTubeID and rlnOriginalIndex.
     
     Args:
         warp_df: DataFrame with warp particles
         template_df: DataFrame with template particles
         warp_coords: Coordinates of warp particles in Angstrom (Nx3)
         template_coords: Coordinates of template particles in Angstrom (Mx3)
+        position_map: Dictionary mapping (tomoName, tubeID, template_idx) -> position_index
     
     Returns:
-        Series of rlnHelicalTubeID values for each warp particle
+        Tuple of (Series of rlnHelicalTubeID, Series of rlnOriginalIndex) for each warp particle
     """
     helical_tube_ids = pd.Series(index=warp_df.index, dtype='Int64')
+    original_indices = pd.Series(index=warp_df.index, dtype='Int64')
     
     # Group by tomogram name
     for tomo_name in warp_df['rlnTomoName'].unique():
@@ -114,17 +141,24 @@ def match_particles_by_tomogram(warp_df: pd.DataFrame, template_df: pd.DataFrame
         # Find nearest neighbor for each warp particle
         distances, nearest_indices = tree.query(warp_tomo_coords)
         
-        # Map back to original template indices and get tube IDs
+        # Map back to original template indices and get tube IDs and position indices
         template_orig_indices = template_indices[nearest_indices]
         tube_ids = template_df.loc[template_orig_indices, 'rlnHelicalTubeID'].values
         
+        # Get position indices from the map
+        pos_indices = np.array([
+            position_map.get((tomo_name, tube_id, template_idx), None)
+            for tube_id, template_idx in zip(tube_ids, template_orig_indices)
+        ])
+        
         # Assign to output series
         helical_tube_ids.loc[warp_indices] = tube_ids
+        original_indices.loc[warp_indices] = pos_indices
         
         print(f"Matched {len(warp_indices)} particles in tomogram {tomo_name} "
               f"(mean distance: {distances.mean():.2f} Å)")
     
-    return helical_tube_ids
+    return helical_tube_ids, original_indices
 
 
 def assign_random_subsets(df: pd.DataFrame) -> pd.Series:
@@ -190,7 +224,8 @@ def assign_random_subsets(df: pd.DataFrame) -> pd.Series:
 def main():
     parser = argparse.ArgumentParser(
         description='Copy rlnHelicalTubeID from template to warp STAR file by matching nearest particles. '
-                    'Automatically adds rlnRandomSubset for balanced half-set assignment.'
+                    'Automatically adds rlnRandomSubset for balanced half-set assignment and '
+                    'rlnOriginalIndex reflecting position along tube (from pre-sorted template).'
     )
     parser.add_argument('--input', required=True,
                         help='Input warp STAR file')
@@ -221,6 +256,10 @@ def main():
     if 'rlnHelicalTubeID' not in template_df.columns:
         raise ValueError("Missing rlnHelicalTubeID in template file")
     
+    # Create position map from template (sorted by Y coordinate)
+    print("\nCreating position map from template (assumes pre-sorted by Y coordinate)...")
+    position_map = create_template_position_map(template_df)
+    
     # Get pixel sizes and compute coordinates in Angstrom
     warp_pixel_size = get_pixel_size_from_optics(warp_star_data)
     print(f"Warp pixel size from optics: {warp_pixel_size} Å")
@@ -238,21 +277,19 @@ def main():
     
     print(f"\nMatching {len(warp_df)} warp particles to {len(template_df)} template particles...")
     
-    # Match particles and get tube IDs
-    helical_tube_ids = match_particles_by_tomogram(warp_df, template_df, 
-                                                     warp_coords, template_coords)
+    # Match particles and get tube IDs and position indices
+    helical_tube_ids, original_indices = match_particles_by_tomogram(
+        warp_df, template_df, warp_coords, template_coords, position_map
+    )
     
-    # Add rlnHelicalTubeID to warp dataframe
+    # Add rlnHelicalTubeID and rlnOriginalIndex to warp dataframe
     warp_df['rlnHelicalTubeID'] = helical_tube_ids
+    warp_df['rlnOriginalIndex'] = original_indices
     
     # Check for any unmatched particles
     unmatched = helical_tube_ids.isna().sum()
     if unmatched > 0:
         print(f"\nWarning: {unmatched} particles could not be matched")
-        
-    # EXPERIMENTAL
-    warp_df['rlnOriginalIndex'] = range(1, len(warp_df) + 1)
-
     
     # Assign random subsets (now default)
     print("\nAssigning random subsets...")
