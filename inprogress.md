@@ -71,7 +71,7 @@ mt_fit.py pipeline CCDC147C_001_particles.star --angpix 14 --sample_step 82 --mi
 
 For batch connection, we need to have all the star files in a folder "input". Navigate into the folder, edit the batch_mt_fit.sh for the right parameters and then run:
 ```bash
-batch_mt_fit.sh
+batch_mt_fit.sh *_particles.star
 ```
 
 At the end check mt_fit_summary.csv for summary.
@@ -79,7 +79,9 @@ At the end check mt_fit_summary.csv for summary.
 
 ### Sort
 ```bash
-mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --n_cilia 2 --rot_threshold 8
+mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --n_cilia 2 
+mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --n_cilia 2 --export-json CCDC147C_001_14.00Apx.json
+mt_fit.py sort CCDC147C_001_particles_processed.star --angpix 14 --manual CCDC147C_001_14.00Apx.json
 ```
 
 This is very experimental and needs more data to test. Should work well if two cilia are not parallel or a single cilia in the tomogram.
