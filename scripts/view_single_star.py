@@ -21,7 +21,6 @@ from utils.view import visualize_star_df
 # Import the file reading utility from the I/O module
 from utils.io import read_star 
     
-
 # --------------------------
 
 def main():
@@ -69,7 +68,7 @@ def main():
         
     # NOTE: The 'visualize_star_df' function must be updated to accept and handle 
     # the 'output_path' argument for this to fully work.
-    visualize_star_df(df, output_path=output_path)
+    visualize_star_df(df, os.path.basename(filepath), output_path=output_path)
 
 if __name__ == '__main__':
     main()

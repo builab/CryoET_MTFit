@@ -5,7 +5,7 @@ import os
 import sys
 
 
-def visualize_star_df(df: pd.DataFrame, output_path: str = None):
+def visualize_star_df(df: pd.DataFrame, input_file: str = "", output_path: str = None):
     """
     Visualizes the 3D coordinates (rlnCoordinateX,Y,Z) from a loaded STAR file DataFrame.
 
@@ -73,7 +73,7 @@ def visualize_star_df(df: pd.DataFrame, output_path: str = None):
                 hoverinfo='skip' # Do not show hover text for the line segments
             ))
 
-        title = "3D Microtubule Traces (Grouped by rlnHelicalTubeID)"
+        title = f"3D Microtubule Traces <br>{input_file}"
         
     else:
         print("No 'rlnHelicalTubeID' found. Plotting as a simple 3D scatter plot.")
@@ -85,11 +85,11 @@ def visualize_star_df(df: pd.DataFrame, output_path: str = None):
             y='rlnCoordinateY', 
             z='rlnCoordinateZ',
             opacity=0.8,
-            title="3D Scatter Plot of All Coordinates",
+            title= f"3D Scatter Plot of All Coordinates<br>{input_file}",
         )
         # Update point size for visibility
         fig.update_traces(marker=dict(size=4, color='#3b82f6'))
-        title = "3D Scatter Plot of All Microtubule Coordinates"
+        title = f"3D Scatter Plot of All Microtubule Coordinates<br>{input_file}"
         
     # --- Common Layout Setup ---
     fig.update_layout(

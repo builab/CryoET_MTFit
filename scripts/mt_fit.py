@@ -354,24 +354,11 @@ def run_connection(
         dist_scale=args.dist_scale,
         debug=True
     )
-    # Filter in bad direction if requested
-    if args.direction_dev > 0:
-        tubes_before = df_connected['rlnHelicalTubeID'].nunique()
-        df_cleaned = filter_by_direction(df_connected, args.direction_angle, args.direction_dev)
-        tubes_after = df_cleaned['rlnHelicalTubeID'].nunique()
-        tubes_removed = tubes_before - tubes_after
- 
-        if tubes_removed > 0:
-            print_info(f"Filtered out {tubes_removed} tubes with direction deviation more than {args.direction_dev} degrees")
-            print_info(f"Final: {tubes_after} tubes, {len(df_final)} particles")
-    else:
-        df_cleaned = df_connected
     		
-
     # Filter short tubes if requested
     if args.min_part_per_tube > 0:
-        tubes_before = df_cleaned['rlnHelicalTubeID'].nunique()
-        df_final = filter_short_tubes(df_cleaned, args.min_part_per_tube)
+        tubes_before = df_connected['rlnHelicalTubeID'].nunique()
+        df_final = filter_short_tubes(df_connected, args.min_part_per_tube)
         tubes_after = df_final['rlnHelicalTubeID'].nunique()
         tubes_removed = tubes_before - tubes_after
         
@@ -379,7 +366,7 @@ def run_connection(
             print_info(f"Filtered out {tubes_removed} tubes with < {args.min_part_per_tube} particles")
             print_info(f"Final: {tubes_after} tubes, {len(df_final)} particles")
     else:
-        df_final = df_cleaned
+        df_final = df_connected
     
     return df_final
 
@@ -659,7 +646,7 @@ Subcommands:
 Examples:
   # Run individual steps
   %(prog)s fit input.star --angpix 14 --sample_step 82
-  %(prog)s clean fitted.star --dist_thres 50
+  %(prog)s clean fitted.star --dist_thres 100
   %(prog)s connect cleaned.star --dist_extrapolate 1500 --overlap_thres 80 --min_part_per_tube 5
   %(prog)s predict connected.star --template input.star --neighbor_rad 100 --max_delta_deg 20
   %(prog)s sort processed.star --n_cilia 2 --tilt_psi_threshold 10 --rot_threshold 8
@@ -667,7 +654,7 @@ Examples:
   
   # Run full pipeline (no sort)
   %(prog)s pipeline input.star --angpix 14 --sample_step 82 \\
-           --dist_thres 50 --dist_extrapolate 1500 --overlap_thres 80 \\
+           --dist_thres 100 --dist_extrapolate 1500 --overlap_thres 80 \\
            --min_part_per_tube 5 --neighbor_rad 100 --template input.star
         """
     )

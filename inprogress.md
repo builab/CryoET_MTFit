@@ -46,7 +46,7 @@ Note: Increase the min_seed to 6 is a lot cleaner than 5 but might ignore some M
 
 ### Clean duplicate
 ```bash
-mt_fit.py clean CCDC147C_001_particles_fitted.star --angpix 14 --dist_thres 50 --psi_min 30 --psi_max 150
+mt_fit.py clean CCDC147C_001_particles_fitted.star --angpix 14 --dist_thres 100 --psi_min 30 --psi_max 150
 ```
 
 --direction_angle, --direction_dev
@@ -54,7 +54,7 @@ mt_fit.py clean CCDC147C_001_particles_fitted.star --angpix 14 --dist_thres 50 -
 
 ### Connect lines
 ```bash
-mt_fit.py connect CCDC147C_001_particles_fitted_cleaned.star --dist_extrapolate 1500 --angpix 14 --min_seed 5 --overlap_thres 80 --sample_step 82 --min_part_per_tube
+mt_fit.py connect CCDC147C_001_particles_fitted_cleaned.star --dist_extrapolate 1500 --angpix 14 --min_seed 5 --overlap_thres 80 --sample_step 82 --min_part_per_tube 10
 ```
 
 To allow connect far apart tubes, increase the --dist_extrapolate to 3000 and --overlap_thres to 200
@@ -104,7 +104,7 @@ You can use ChimeraX with ArtiaX installed to visualize star files. On the other
 
 ### Visualize initial fit
 ```bash
-view_star.py CCDC147C_001_particles.star
+view_single_star.py CCDC147C_001_particles.star
 ```
 
 ![Template Matching STAR file example](imgs/TMstarfile.png)
