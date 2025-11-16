@@ -53,3 +53,5 @@ v.0.9.11
  - Add extract_particles_from_star.py to extract rlnTomoName or rlnHelicalTubeID
  - Generate average of each cilia
  - Add file name to view_star.py, rename to view_single_star.py
+ - Fix bug when only 1 tube in cleaning
+ - Fix bug when rlnLCCmax not present (none pytom_match_pick output)

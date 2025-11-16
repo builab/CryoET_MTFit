@@ -298,6 +298,10 @@ def run_cleaning(df_input: pd.DataFrame, args: argparse.Namespace, step_num: int
     print_info(f"Distance threshold: {args.dist_thres} Å")
     print_info(f"Bounding box margin: {args.margin} Å")
     
+    if df_input['rlnHelicalTubeID'].nunique() == 1:
+        print('Only 1 tube found. Skip cleaning!')
+        return df_input
+    
     df_filtered = clean_tubes(df=df_input,
         angpix=args.angpix,
         distance_threshold=args.dist_thres,

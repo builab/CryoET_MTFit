@@ -106,8 +106,10 @@ def filter_by_lcc(
     """
     # Validate inputs
     validate_dataframe(df_input, COORD_COLUMNS + ['rlnHelicalTubeID'])
-    validate_dataframe(df_template, COORD_COLUMNS + ['rlnLCCmax'])
+    validate_dataframe(df_template, COORD_COLUMNS)
     
+    has_lcc = 'rlnLCCmax' in df_template.columns
+    	
     if not 0 < keep_percentage <= 100:
         raise ValueError(
             f"keep_percentage must be in (0, 100], got {keep_percentage}"
@@ -120,8 +122,11 @@ def filter_by_lcc(
     print("LCC FILTERING")
     print(f"{'='*60}")
     print(f"  Radius: {neighbor_radius:.1f} Å ({radius_px:.2f} px)")
-    print(f"  Keeping top {keep_percentage}% by LCC score")
-    
+    if has_lcc:
+        print(f"  Keeping top {keep_percentage}% by LCC score")
+    else:
+        print(f"  ⚠ No rlnLCCmax column - keeping all neighbors")
+            
     # Build spatial index for template particles
     template_coords = df_template[COORD_COLUMNS].to_numpy(dtype=float)
     kdtree = cKDTree(template_coords)
@@ -153,11 +158,14 @@ def filter_by_lcc(
         neighbor_mask[list(neighbor_indices)] = True
         neighbors_df = df_template[neighbor_mask]
         
-        # Keep top percentage by LCC score
-        neighbors_sorted = neighbors_df.sort_values('rlnLCCmax', ascending=False)
-        n_keep = max(1, int(np.ceil(len(neighbors_sorted) * keep_percentage / 100.0)))
-        top_particles = neighbors_sorted.iloc[:n_keep]
-        
+        if 'rlnLCCmax' in df_template.columns:
+            # Keep top percentage by LCC score
+            neighbors_sorted = neighbors_df.sort_values('rlnLCCmax', ascending=False)
+            n_keep = max(1, int(np.ceil(len(neighbors_sorted) * keep_percentage / 100.0)))
+            top_particles = neighbors_sorted.iloc[:n_keep]
+        else:
+            top_particles = neighbors_df
+            
         indices_to_keep.update(top_particles.index)
     
     # Create filtered DataFrame
