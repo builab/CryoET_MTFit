@@ -1,5 +1,7 @@
 - Test with data
+- Restrict polynomial 2 or 3 to relatively straight line
 - Fit with spline line for more accurate? (Future version)
+- What about fit on existing data with rlnHelicalTubeID for segmentation & also correction
 - Generate json or specific output line so we can use a batch function for processing.
 - For the tip, perhaps a directional filter (the majority) will work better
 
