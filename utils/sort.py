@@ -371,10 +371,16 @@ def plot_cross_section(cross_section_px, pixel_size_A, ellipse_params=None, outp
         axes = [ellipse_params['a'], ellipse_params['b']]
         angle = ellipse_params['phi']
         fitted = ellipse_points(center, axes, angle)
+
         
         ex_nm = px_to_nm(fitted[0], pixel_size_A)
         ey_nm = px_to_nm(fitted[1], pixel_size_A)
         plt.plot(ex_nm, ey_nm, 'r--', label='Fitted Ellipse', linewidth=2, zorder=2)
+        
+        # Debug
+        print(f"Center {ellipse_params['X0']}, {ellipse_params['Y0']})
+        print(ex_nm, ey_nm)
+        print(f"Axis a {ellipse_params['a']} and b {ellipse_params['b']}")
         
         distortion = ellipse_params['a'] / ellipse_params['b']
         mx_nm = float(np.mean(px_to_nm(cs['rlnCoordinateX'], pixel_size_A)))
