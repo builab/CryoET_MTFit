@@ -378,8 +378,8 @@ def plot_cross_section(cross_section_px, pixel_size_A, ellipse_params=None, outp
         plt.plot(ex_nm, ey_nm, 'r--', label='Fitted Ellipse', linewidth=2, zorder=2)
         
         # Debug
-        print(f"Center {ellipse_params['X0']}, {ellipse_params['Y0']})
-        print(ex_nm, ey_nm)
+        print(f"Center {ellipse_params['X0']}, {ellipse_params['Y0']}")
+        #print(ex_nm, ey_nm)
         print(f"Axis a {ellipse_params['a']} and b {ellipse_params['b']}")
         
         distortion = ellipse_params['a'] / ellipse_params['b']
