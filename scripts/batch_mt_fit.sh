@@ -3,22 +3,21 @@
 # Use this so we can run a common parameter on everything and generate a summarized csv file
 # Builab@McGill 2025
 
+# Find all files matching the pattern *_particles.star in the current directory and loop through them
+TARGET_FILES=(*_particles.star)
+
 # Define the common parameters for the fitting script. Mind the gap at the start & end of quote
-FIT_PARAMS=" --angpix 14 --sample_step 83 --min_seed 6 --poly_order 3 --dist_thres 50 --dist_extrapolate 2000 --overlap_thres 100 --neighbor_rad 100 --min_part_per_tube 10 "
+FIT_PARAMS=" --angpix 14 --sample_step 83 --min_seed 6 --poly_order 3 --dist_thres 50 --dist_extrapolate 2000 --overlap_thres 200 --neighbor_rad 100 --min_part_per_tube 10 "
 
 # Optional param, make as empty if needed
 OPTIONAL_PARAMS=""
-#OPTIONAL_PARAMS="--psi_min 30 --psi_max 150"
+#OPTIONAL_PARAMS="--psi_min 25 --psi_max 165" # Directional filter
 
 # Define the output log file to track fitting results
 LOG_FILE="mt_fit_summary.csv"
 
 # Create/clear the log file with headers
 echo "STAR_FILE,NO_TUBES,NO_PARTICLES,MEDIAN_PSI" > "$LOG_FILE"
-
-# Find all files matching the pattern *_particles.star in the current directory and loop through them
-# Fix: Changed *.star to *_particles.star
-TARGET_FILES=(*_particles.star)
 
 # Check if any files matching the pattern were found
 if [ "${#TARGET_FILES[@]}" -eq 0 ] || [ "${TARGET_FILES[0]}" = "*_particles.star" ]; then

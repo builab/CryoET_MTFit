@@ -1,6 +1,6 @@
 - Test with data
-- Restrict polynomial 2 or 3 to relatively straight line
-- Fit with spline line for more accurate? (Future version)
+- Restrict polynomial 2 or 3 to relatively straight line (Low priority)
+- Fit with spline line for more accurate? (Future version) (Low priority)
 - What about fit on existing data with rlnHelicalTubeID for segmentation & also correction
 - Generate json or specific output line so we can use a batch function for processing.
 - For the tip, perhaps a directional filter (the majority) will work better
@@ -51,7 +51,10 @@ v.0.9.10
 
 v.0.9.11
  - Add extract_particles_from_star.py to extract rlnTomoName or rlnHelicalTubeID
- - Generate average of each cilia
+ - Generate average of each cilia (Not tested)
  - Add file name to view_star.py, rename to view_single_star.py
  - Fix bug when only 1 tube in cleaning
  - Fix bug when rlnLCCmax not present (none pytom_match_pick output)
+ - Improve the line connecting
+ - Overlay and scoring calculating for view_single_star.py (utils/scoring.py)
+ 

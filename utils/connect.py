@@ -569,6 +569,130 @@ def refit_and_resample_all_tubes(
             df_output[col] = 0.0
     
     return df_output[required_cols]
+    
+    
+def resolve_overlapping_tubes(
+    df: pd.DataFrame,
+    angpix: float,
+    overlap_dist: float,
+    poly_order_final: int,
+    sample_step: float,
+    min_overlap_points: int = 3,
+    contained_fraction: float = 0.7,
+    debug: bool = False,
+) -> pd.DataFrame:
+    """
+    Detect and merge heavily overlapping tube fragments.
+
+    Idea:
+      * If two tubes have many points closer than `overlap_dist` Ã,
+        and one tube is largely contained inside the other
+        (fraction of overlapping points >= contained_fraction),
+        treat them as one filament and merge them.
+      * Merging is done via existing merge + refit + resample pipeline,
+        so the final trajectory is smooth.
+
+    Args:
+        df: DataFrame after normal connect_tubes() iterations.
+        angpix: Pixel size in Angstroms.
+        overlap_dist: Distance threshold in Ã to consider points overlapping.
+        poly_order_final: Poly order for final refit.
+        sample_step: Resampling step size in Ã.
+        min_overlap_points: Minimum number of overlapping points
+                            before we consider a pair.
+        contained_fraction: Minimum fraction of a tube's points that must be
+                            overlapping to be treated as a duplicate fragment.
+        debug: If True, print detailed info for each overlapping pair.
+
+    Returns:
+        DataFrame with overlapping tube fragments merged and resampled.
+    """
+    if df.empty:
+        return df
+
+    tube_ids = sorted(df['rlnHelicalTubeID'].unique())
+    connections: List[Dict[str, Any]] = []
+
+    print("\n" + "=" * 60)
+    print("Resolving heavily overlapping tube fragments")
+    print("=" * 60)
+
+    for i, tube1 in enumerate(tube_ids):
+        df1 = df[df['rlnHelicalTubeID'] == tube1]
+        if len(df1) < 2:
+            continue
+
+        coords1 = df1[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values * angpix
+
+        for tube2 in tube_ids[i + 1:]:
+            df2 = df[df['rlnHelicalTubeID'] == tube2]
+            if len(df2) < 2:
+                continue
+
+            coords2 = df2[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values * angpix
+
+            # Pairwise distances between all points in tube1 and tube2
+            diff = coords1[:, None, :] - coords2[None, :, :]
+            dists = np.linalg.norm(diff, axis=2)
+
+            min1 = dists.min(axis=1)  # nearest point on tube2 for each tube1 point
+            min2 = dists.min(axis=0)  # nearest point on tube1 for each tube2 point
+
+            overlap_mask1 = min1 < overlap_dist
+            overlap_mask2 = min2 < overlap_dist
+
+            count1 = int(overlap_mask1.sum())
+            count2 = int(overlap_mask2.sum())
+
+            if max(count1, count2) < min_overlap_points:
+                # Not enough overlapping points to care
+                continue
+
+            frac1 = count1 / len(coords1)
+            frac2 = count2 / len(coords2)
+
+            # Only consider pairs where one tube is largely contained inside the other
+            if max(frac1, frac2) < contained_fraction:
+                # Likely just a short crossing; leave as separate tubes
+                continue
+
+            min_overlap = float(dists.min())
+            connections.append(
+                {
+                    "tube_id1": int(tube1),
+                    "tube_id2": int(tube2),
+                    "min_overlap_dist": min_overlap,
+                }
+            )
+
+            if debug:
+                print(
+                    f"  Candidate overlap: {tube1} â {tube2}  "
+                    f"min_dist={min_overlap:.1f} Ã  "
+                    f"frac1={frac1:.2f}, frac2={frac2:.2f}"
+                )
+
+    if not connections:
+        print("  No heavy overlaps detected")
+        return df
+
+    print(f"  Found {len(connections)} overlapping tube pairs to merge")
+
+    # Merge and refit using the existing pipeline utilities
+    df_merged, _ = merge_connected_tubes(df, connections)
+
+    print(f"  Merged {df['rlnHelicalTubeID'].nunique() - df_merged['rlnHelicalTubeID'].nunique()} tube groups")
+    print("  Refitting & resampling merged overlaps...")
+
+    df_final = refit_and_resample_all_tubes(
+        df_merged,
+        poly_order_final,
+        sample_step,
+        angpix,
+    )
+
+    return df_final
+
 
 def connect_tubes_once(
     df: pd.DataFrame,
@@ -809,7 +933,19 @@ def connect_tubes(
         # Scale distance for next iteration
         if iteration < max_iterations:
             current_dist *= dist_scale
-    
+            
+    # Final pass: merge heavily overlapping duplicate fragments
+    df_current = resolve_overlapping_tubes(
+        df_current,
+        angpix=angpix,
+        overlap_dist=overlap_threshold,
+        poly_order_final=poly_order_final,
+        sample_step=sample_step,
+        min_overlap_points=3,         # you can tune this
+        contained_fraction=0.7,       # you can tune this
+        debug=True,
+    )
+
     # Final summary
     tubes_final = df_current['rlnHelicalTubeID'].nunique()
     particles_final = len(df_current)

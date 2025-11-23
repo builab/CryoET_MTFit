@@ -32,10 +32,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Visualize 3D coordinates from a STAR file.",
         epilog="Usage examples:\n"
-               "  python view_single_star.py particles.star\n"
-               "  python view_single_star.py --overlay file2.star file1.star\n"
-               "  python view__single_star.py --overlay file2.star file1.star -o output.html"
-               "  python view__single_star.py --overlay file2.star --distance_threshold 60 file1.star -o output.html",
+               "  python script/view_star.py particles.star\n"
+               "  python script/view_star.py --overlay file2.star file1.star\n"
+               "  python script/view_star.py --overlay file2.star file3.star file1.star -o output.html",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
@@ -51,14 +50,6 @@ def main():
              "Example: --overlay file2.star"
     )
     parser.add_argument(
-        '--distance_threshold',
-        type=float,
-        default=60,
-        help="Distance threshold (in Angstroms) for calculating tube coverage scores. "
-             "Only used with --overlay when main file has rlnHelicalTubeID and overlay file doesn't. "
-             "Example: --distance_threshold 60"
-    )
-    parser.add_argument(
         '-o', '--output',
         type=str,
         default=None,
@@ -70,7 +61,6 @@ def main():
     filepath = args.star_file
     overlay_file = args.overlay
     output_path = args.output
-    distance_threshold = args.distance_threshold
 
     # Check if main file exists
     if not os.path.exists(filepath):
@@ -113,8 +103,7 @@ def main():
             overlay_df, 
             os.path.basename(filepath),
             os.path.basename(overlay_file),
-            output_path=output_path,
-            distance_threshold=distance_threshold
+            output_path=output_path
         )
         
     else:

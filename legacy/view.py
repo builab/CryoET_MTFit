@@ -1,13 +1,8 @@
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
 import os
 import sys
-
-# Import scoring utilities
-from .scoring import calculate_tube_scores, print_tube_scores
-
 
 
 def visualize_star_df(df: pd.DataFrame, input_file: str = "", output_path: str = None):
@@ -121,96 +116,9 @@ def visualize_star_df(df: pd.DataFrame, input_file: str = "", output_path: str =
         fig.show()
 
 
-def calculate_tube_coverage_scores(main_df: pd.DataFrame, overlay_df: pd.DataFrame, 
-                                   distance_threshold: float) -> dict:
-    """
-    Calculate coverage and spreading scores for each tube in main_df based on proximity to points in overlay_df.
-    
-    Coverage score: What fraction of fitted points have at least one original point nearby?
-    Spreading score: How concentrated are the original points around fitted points? (1.0 = ideal one-to-one)
-    
-    Args:
-        main_df: DataFrame with rlnHelicalTubeID (fitted tubes)
-        overlay_df: DataFrame without rlnHelicalTubeID (original scatter points)
-        distance_threshold: Maximum distance (in Angstroms) to consider a point as "covered"
-    
-    Returns:
-        Dictionary mapping tube_id to dict with 'coverage', 'spreading', and 'avg_matches'
-    """
-    # Get pixel size to convert threshold from Angstroms to pixels
-    if 'rlnImagePixelSize' not in main_df.columns:
-        print("Error: rlnImagePixelSize not found in main file. Cannot calculate distances.")
-        return {}
-    
-    if 'rlnImagePixelSize' not in overlay_df.columns:
-        print("Error: rlnImagePixelSize not found in overlay file. Cannot calculate distances.")
-        return {}
-    
-    # Use pixel size from main file (should be the same in both files)
-    pixel_size = main_df['rlnImagePixelSize'].iloc[0]
-    
-    # Convert distance threshold from Angstroms to pixels
-    distance_threshold_pixels = distance_threshold / pixel_size
-    
-    print(f"  Pixel size: {pixel_size} Angstroms/pixel")
-    print(f"  Distance threshold: {distance_threshold} Angstroms = {distance_threshold_pixels:.2f} pixels")
-    
-    # Extract coordinates from overlay (original points)
-    overlay_coords = overlay_df[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
-    
-    scores = {}
-    tube_ids = main_df['rlnHelicalTubeID'].unique()
-    
-    for tube_id in tube_ids:
-        # Get all points for this tube
-        tube_df = main_df[main_df['rlnHelicalTubeID'] == tube_id]
-        tube_coords = tube_df[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
-        
-        # Track coverage and spreading metrics
-        points_with_coverage = 0
-        total_matched_original_points = 0
-        matched_original_indices = set()
-        
-        for tube_point in tube_coords:
-            # Calculate distances from this tube point to all original points (in pixels)
-            distances = np.sqrt(np.sum((overlay_coords - tube_point)**2, axis=1))
-            
-            # Find all original points within threshold
-            within_threshold = distances <= distance_threshold_pixels
-            num_matches = np.sum(within_threshold)
-            
-            if num_matches > 0:
-                points_with_coverage += 1
-                total_matched_original_points += num_matches
-                
-                # Track which original points were matched (to avoid double-counting)
-                matched_indices = np.where(within_threshold)[0]
-                matched_original_indices.update(matched_indices)
-        
-        # Calculate coverage score
-        total_fitted_points = len(tube_coords)
-        coverage_score = points_with_coverage / total_fitted_points if total_fitted_points > 0 else 0.0
-        
-        # Calculate spreading score
-        if points_with_coverage > 0:
-            avg_matches = total_matched_original_points / points_with_coverage
-            spreading_score = 1.0 / avg_matches  # Ideal = 1.0 (one-to-one), lower = more spreading
-        else:
-            avg_matches = 0.0
-            spreading_score = None
-        
-        scores[str(tube_id)] = {
-            'coverage': coverage_score,
-            'spreading': spreading_score,
-            'avg_matches': avg_matches
-        }
-    
-    return scores
-
-
 def visualize_overlay_star_dfs(main_df: pd.DataFrame, overlay_df: pd.DataFrame, 
                                 main_filename: str, overlay_filename: str, 
-                                output_path: str = None, distance_threshold: float = None):
+                                output_path: str = None):
     """
     Visualizes two STAR files overlaid in the same 3D plot.
     The main file is displayed normally, and the overlay file is shown with transparency.
@@ -222,8 +130,6 @@ def visualize_overlay_star_dfs(main_df: pd.DataFrame, overlay_df: pd.DataFrame,
         overlay_filename: Filename of the overlay file.
         output_path: Optional path to save the plot as an interactive HTML file.
                      If None, the plot attempts to open in a web browser.
-        distance_threshold: Optional distance threshold for calculating coverage scores.
-                           Only used when main has rlnHelicalTubeID and overlay doesn't.
     """
     # Check for mandatory coordinate columns in both DataFrames
     required_cols = ['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']
@@ -236,26 +142,6 @@ def visualize_overlay_star_dfs(main_df: pd.DataFrame, overlay_df: pd.DataFrame,
             return
     
     print(f"--- Creating overlay visualization ---")
-    
-    # Check if we should calculate coverage scores
-    has_main_tubes = 'rlnHelicalTubeID' in main_df.columns
-    has_overlay_tubes = 'rlnHelicalTubeID' in overlay_df.columns
-    
-    calculate_scores = (
-        distance_threshold is not None and
-        has_main_tubes and
-        not has_overlay_tubes and
-        calculate_tube_scores is not None
-    )
-    
-    if calculate_scores:
-        print(f"--- Calculating tube coverage and spreading scores (threshold: {distance_threshold} Angstroms) ---")
-        try:
-            scores = calculate_tube_scores(main_df, overlay_df, distance_threshold, verbose=True)
-            print_tube_scores(scores, title="Tube Coverage and Spreading Scores")
-        except Exception as e:
-            print(f"Error calculating scores: {e}")
-            print("Continuing with visualization...")
     
     fig = go.Figure()
     
@@ -313,7 +199,7 @@ def visualize_overlay_star_dfs(main_df: pd.DataFrame, overlay_df: pd.DataFrame,
     
     # --- Plot Overlay File (With Transparency) ---
     print(f"Overlay file '{overlay_filename}': ", end="")
-    overlay_color = '#3b82f6'  # Same blue color as main scatter
+    overlay_color = '#3b82f6'  # Distinct red color for overlay
     overlay_opacity = 0.3  # Transparency for overlay
     overlay_line_opacity = 0.4
     

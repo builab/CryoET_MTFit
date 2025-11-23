@@ -27,6 +27,8 @@ from .predict import predict_angles
 
 from .sort import group_and_sort
 
+from .scoring import calculate_tube_scores, print_tube_scores
+
 __all__ = [
     # Fit functions
     'fit_curves',
@@ -44,7 +46,10 @@ __all__ = [
     'read_star',
     'write_star',
     # Sort function
-    'group_and_sort'
+    'group_and_sort',
+    # Scoring
+    'calculate_tube_scores',
+    'print_tube_scores'
 ]
 
 __version__ = '1.0.0'
