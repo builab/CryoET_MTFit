@@ -58,3 +58,5 @@ v.0.9.11
  - Improve the line connecting
  - Overlay and scoring calculating for view_single_star.py (utils/scoring.py)
  
+v.0.9.12
+ - Fix sort with skilearn version

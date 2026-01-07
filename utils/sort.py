@@ -18,6 +18,7 @@ from .io import validate_dataframe
 from collections import defaultdict
 from typing import Dict, Tuple, Optional
 from scipy.linalg import lstsq
+
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
 import warnings
 warnings.filterwarnings('ignore')
@@ -672,6 +673,16 @@ def classify_doublet_microtubules(tube_stats, cilia_groups, rot_threshold=10, en
     rot_threshold : float, angular difference threshold for Rot (degrees)
     enforce_9_doublets : bool, if True, force exactly 9 doublets per cilium
     """
+    # Enforce version mismatch
+    from sklearn import __version__ as sklearn_version
+
+    # Check scikit-learn version
+    sklearn_major = int(sklearn_version.split('.')[0])
+    sklearn_minor = int(sklearn_version.split('.')[1])
+
+    # affinity was renamed to metric in scikit-learn 1.2+
+    use_metric = (sklearn_major > 1) or (sklearn_major == 1 and sklearn_minor >= 2)
+    
     doublet_assignments = {}
     
     for cilium_id, tube_list in cilia_groups.items():
@@ -705,12 +716,20 @@ def classify_doublet_microtubules(tube_stats, cilia_groups, rot_threshold=10, en
         if enforce_9_doublets and len(tube_list) >= 9:
             # Force exactly 9 clusters
             # affinity=precomputed is very important
-            clustering = AgglomerativeClustering(n_clusters=9, linkage='average', affinity='precomputed')
+            if use_metric:
+                clustering = AgglomerativeClustering(n_clusters=9, linkage='average', metric='precomputed')
+            else:
+                clustering = AgglomerativeClustering(n_clusters=9, linkage='average', affinity='precomputed')
             doublet_labels = clustering.fit_predict(rot_dist)
             print(f"  Enforcing 9 doublets (from {len(tube_list)} tubes)")
         else:
             # Auto-detect number of doublets
-            clustering = AgglomerativeClustering(n_clusters=None,
+            if use_metric:
+                clustering = AgglomerativeClustering(n_clusters=None,
+                                                distance_threshold=rot_threshold,
+                                                linkage='single', metric='precomputed')
+            else:
+                clustering = AgglomerativeClustering(n_clusters=None,
                                                 distance_threshold=rot_threshold,
                                                 linkage='single', affinity='precomputed')
             doublet_labels = clustering.fit_predict(rot_dist)
