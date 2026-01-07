@@ -570,7 +570,7 @@ def classify_cilia_groups(tube_stats, n_cilia=None, tilt_psi_threshold=15, coord
     coord_threshold : float, spatial distance threshold for parallel cilia
     """
     n_tubes = len(tube_stats)
-    tube_ids = tube_stats.index.values
+    tube_ids = tube_stats.index.astype(int).tolist()
     
     # Compute pairwise angular differences for Tilt and Psi
     tilt_vals = tube_stats['rlnAngleTilt'].values
@@ -675,6 +675,7 @@ def classify_doublet_microtubules(tube_stats, cilia_groups, rot_threshold=10, en
     doublet_assignments = {}
     
     for cilium_id, tube_list in cilia_groups.items():
+        tube_list = [int(t) for t in tube_list] 
         print(f"\nProcessing Cilium {cilium_id + 1} with {len(tube_list)} tubes:")
         
         rot_vals = tube_stats.loc[tube_list, 'rlnAngleRot'].values
@@ -767,6 +768,7 @@ def create_grouped_dataframe(df, doublet_assignments):
     tube_id_mapping = {}
     
     for orig_tube_id, (cilium_group, doublet_id) in doublet_assignments.items():
+        orig_tube_id = int(orig_tube_id)
         # Calculate new tube ID: (CiliaGroup - 1) * 10 + DoubletID
         new_tube_id = (cilium_group - 1) * 10 + doublet_id
         tube_id_mapping[orig_tube_id] = new_tube_id
