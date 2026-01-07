@@ -98,8 +98,8 @@ tail -n +2 "$CSV_FILE" | while IFS=',' read -r star_file no_tubes no_particles m
 done
 
 # Count results
-SUCCESS=$(grep -c "SUCCESS" "$TEMP_RESULTS" 2>/dev/null || echo 0)
-FAILED=$(grep -c "FAILED" "$TEMP_RESULTS" 2>/dev/null || echo 0)
+SUCCESS=$(grep -c "SUCCESS" "$TEMP_RESULTS" 2>/dev/null | xargs || echo 0)
+FAILED=$(grep -c "FAILED" "$TEMP_RESULTS" 2>/dev/null | xargs || echo 0)
 
 # Calculate success rate safely
 if [ "$TOTAL" -gt 0 ]; then
@@ -181,7 +181,7 @@ echo ""
 cat "$SUMMARY_REPORT"
 
 # Exit with appropriate code
-if [ $FAILED -gt 0 ]; then
+if [ "$FAILED" -gt 0 ]; then
     exit 1
 else
     exit 0
