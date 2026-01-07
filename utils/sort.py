@@ -507,23 +507,14 @@ def sort_doublet_order(df, pixel_size_A, fit_method='ellipse', out_png=None):
     
     # Plot if requested
     if out_png:
-        if n_cilia == 1:
-            # Single cilium - use existing plot function
-            cilia_id = cilia_groups[0]
+        base_name = out_png.rsplit('.', 1)[0]
+        ext = out_png.rsplit('.', 1)[1] if '.' in out_png else 'png'
+        for cilia_id in cilia_groups:
             if all_cross_sections[cilia_id] is not None:
-                plot_cross_section(all_cross_sections[cilia_id], pixel_size_A, 
-                                 all_ellipse_params[cilia_id], out_png)
-        else:
-            # Multiple cilia - plot each separately with cilium ID in filename
-            for cilia_id in cilia_groups:
-                if all_cross_sections[cilia_id] is not None:
-                    # Create output filename with cilium ID
-                    base_name = out_png.rsplit('.', 1)[0]
-                    ext = out_png.rsplit('.', 1)[1] if '.' in out_png else 'png'
-                    cilia_png = f"{base_name}_cilium{cilia_id}.{ext}"
-                    
-                    plot_cross_section(all_cross_sections[cilia_id], pixel_size_A,
-                                     all_ellipse_params[cilia_id], cilia_png)
+                # Create output filename with cilium ID
+                cilia_png = f"{base_name}_cilium{cilia_id}.{ext}"                    
+                plot_cross_section(all_cross_sections[cilia_id], pixel_size_A,
+                                 all_ellipse_params[cilia_id], cilia_png)
     
     return df_out
 
