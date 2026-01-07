@@ -98,8 +98,15 @@ tail -n +2 "$CSV_FILE" | while IFS=',' read -r star_file no_tubes no_particles m
 done
 
 # Count results
-SUCCESS=$(grep -c "SUCCESS" "$TEMP_RESULTS" || echo 0)
-FAILED=$(grep -c "FAILED" "$TEMP_RESULTS" || echo 0)
+SUCCESS=$(grep -c "SUCCESS" "$TEMP_RESULTS" 2>/dev/null || echo 0)
+FAILED=$(grep -c "FAILED" "$TEMP_RESULTS" 2>/dev/null || echo 0)
+
+# Calculate success rate safely
+if [ "$TOTAL" -gt 0 ]; then
+    SUCCESS_RATE=$(awk "BEGIN {printf \"%.1f\", ($SUCCESS/$TOTAL)*100}")
+else
+    SUCCESS_RATE="0.0"
+fi
 
 # Generate summary report
 cat > "$SUMMARY_REPORT" <<EOF
@@ -119,7 +126,7 @@ Results:
   Total entries: $TOTAL
   Successful: $SUCCESS
   Failed: $FAILED
-  Success rate: $(awk "BEGIN {printf \"%.1f\", ($SUCCESS/$TOTAL)*100}")%
+  Success rate: ${SUCCESS_RATE}%
 
 ======================================================================
 Detailed Results:
