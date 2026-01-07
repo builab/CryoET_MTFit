@@ -1459,6 +1459,7 @@ def group_and_sort(
     )
 
     if out_png:
-        print(f"[info] Saved plot → {out_png}")
+        base_name = out_png.rsplit('.', 1)[0]
+        print(f"[info] Saved plot → {base_name}_ciliumX.png")
 
     return sorted_df
