@@ -123,14 +123,16 @@ def read_star(file_path: str) -> pd.DataFrame:
         df = df.rename(columns={'rlnMicrographName': 'rlnTomoName'})
         print('Rename rlnMicrographName to rlnTomoName')
 
+    # **HIGHLIGHTED CHANGE: Add default rlnTomoName if missing**
+    if 'rlnTomoName' not in df.columns:
+        df['rlnTomoName'] = 'TS_001'
+        print('rlnTomoName column not found - added with default value: TS_001')
         
     # --- Step 2: Remove trailing .tomostar first ---    
     if 'rlnTomoName' in df.columns:
     	# Sanitize tomoName
         df['rlnTomoName'] = df['rlnTomoName'].str.replace(r'\.tomostar$', '', case=False, regex=True)
         df['rlnTomoName'] = df['rlnTomoName'].apply(sanitize_name)
-    else:
-        raise ValueError("Input STAR file missing rlnTomoName column")
         
     # --- Step 3: Unify rlnImagePixelSize ---    
     if 'rlnDetectorPixelSize' in df.columns and 'rlnImagePixelSize' not in df.columns:
