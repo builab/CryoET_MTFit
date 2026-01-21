@@ -61,8 +61,14 @@ To allow connect far apart tubes, increase the --dist_extrapolate to 3000 and --
 
 ### Predict
 ```bash
-mt_fit.py predict CCDC147C_001_particles_fitted_cleaned_connected.star --angpix 14 --template CCDC147C_001_particles.star --neighbor_rad 100 --max_delta_degree 15
+mt_fit.py predict CCDC147C_001_particles_fitted_cleaned_connected.star --angpix 14 --template CCDC147C_001_particles.star --neighbor_rad 100 --max_delta_deg 15
 ```
+
+If simply ignore rlnAngleRot and generate rlnAngleTilt/Psi based on tube geometry. (direction 0: from small to large Y, direction 1: from large to small Y)
+```bash
+mt_fit.py predict CCDC147C_001_particles_fitted_cleaned_connected.star --angpix 14 --direction 1
+```
+
 
 ### One commandline for all (fit -> clean -> connect -> predict)
 ```bash

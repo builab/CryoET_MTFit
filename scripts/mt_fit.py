@@ -171,14 +171,16 @@ def add_connect_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_predict_arguments(parser: argparse.ArgumentParser) -> None:
     """Add predict-specific arguments."""
-    parser.add_argument('--template', type=str, required=True,
-                       help='Template STAR file for angle prediction (REQUIRED)')
+    parser.add_argument('--template', type=str, default=None,
+                       help='Template STAR file for angle prediction')
     parser.add_argument('--neighbor_rad', type=float, default=100,
                        help='Radius for finding neighbor particles in Angstroms (default: 100)')
     parser.add_argument('--max_delta_deg', type=float, default=20,
                        help='Max angle deviation within same tube in degrees (default: 20)')
     parser.add_argument('--lcc_keep_percentage', type=float, default=DEFAULT_LCC_KEEP_PERCENTAGE,
                        help=f'Percentage of LCC particles to keep (default: {DEFAULT_LCC_KEEP_PERCENTAGE})')
+    parser.add_argument('--direction', type=int, choices=[0, 1], default=0, 
+                            help='0: Keep as is, 1: Flip Psi direction')                   
           
                        
 def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
@@ -406,6 +408,15 @@ def run_prediction(df_input: pd.DataFrame, df_template: pd.DataFrame,
     print_info(f"Neighbor radius: {args.neighbor_rad} Å")
     print_info(f"Template file: {args.template}")
     print_info(f"LCC keep percentage: {args.lcc_keep_percentage}%")
+    
+    # 2. Load the template (Conditional)
+    df_template = None
+    if args.template is not None:
+        # Only call read_star if a path was actually provided
+        print(f"[INFO] Loading template from: {args.template}")
+        df_template = read_star(args.template)
+    else:
+        print("[INFO] No template provided. Operating in template-free mode.")
 
     df_all = predict_angles(
         df_input=df_input,
@@ -414,7 +425,8 @@ def run_prediction(df_input: pd.DataFrame, df_template: pd.DataFrame,
         neighbor_radius=args.neighbor_rad,
         lcc_keep_percent=args.lcc_keep_percentage,
         snap_max_delta=args.max_delta_deg,
-        snap_min_points=5)
+        snap_min_points=5,
+        direction=args.direction)
     
     print_summary("Prediction Results", [
         f"Particles with predicted angles: {len(df_all[0])}"
@@ -530,8 +542,10 @@ def cmd_predict(args: argparse.Namespace) -> None:
     
     try:
         # Read input files
-        df_input = read_star(args.input)        
-        df_template = read_star(args.template)
+        df_input = read_star(args.input)
+        df_template = None
+        if args.template is not None:        
+           df_template = read_star(args.template) 
         
         df_predicted = run_prediction(df_input, df_template, args)
         

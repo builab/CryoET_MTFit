@@ -64,3 +64,8 @@ v.0.9.12
  
 v.0.9.13
  - Fix problem of no rlnMicrographName or rlnTomoName
+ - Add to predict.py with option to not predict with direction (Good for singlet microtubule)
+ 
+
+TODO: Add microtubule twist for picking (change further)
+TODO: Add straightness fitting

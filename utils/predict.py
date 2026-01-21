@@ -516,82 +516,43 @@ def smooth_angles(df):
 
 def predict_angles(
     df_input: pd.DataFrame,
-    df_template: pd.DataFrame,
-    angpix: float,
-    neighbor_radius: float = DEFAULT_MAPPING_RADIUS,
-    lcc_keep_percent: float = DEFAULT_LCC_KEEP_PERCENT,
-    snap_max_delta: float = DEFAULT_SNAP_MAX_DELTA,
-    snap_min_points: int = DEFAULT_MIN_FILAMENT_POINTS
+    df_template: Optional[pd.DataFrame] = None,
+    angpix: float = 14.0,
+    neighbor_radius: float = 100.0,
+    lcc_keep_percent: float = 80.0,
+    snap_max_delta: float = 20.0,
+    snap_min_points: int = 5,
+    direction: int = 0
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
-    """
-    Complete angle prediction pipeline.
     
-    Executes three-stage pipeline:
-    1. Filter template by LCC scores
-    2. Map angles from template to input
-    3. Snap outlier angles to filament medians
-    4. Smooth the angles using smooth_angles (might not work well with singlet microtubule)
-    
-    Args:
-        df_input: Input particles to predict angles for.
-        df_template: Template particles with known angles and LCC scores.
-        angpix: Pixel size in Angstroms.
-        neighbor_radius: Search radius in Angstroms for filtering and mapping.
-        lcc_keep_percent: Percentage of top LCC particles to keep.
-        snap_max_delta: Maximum angular deviation before snapping.
-        snap_min_points: Minimum points per filament for snapping.
-    
-    Returns:
-        Tuple of (final_dataframe, intermediates_dict) where intermediates
-        contains 'filtered' and 'mapped' DataFrames.
-    """
-    print("\n" + "="*60)
-    print("ANGLE PREDICTION PIPELINE")
-    print("="*60)
-    print(f"  Input particles: {len(df_input)}")
-    print(f"  Template particles: {len(df_template)}")
-    
+    df_working = df_input.copy()
     intermediates = {}
+
+    # --- New: Direction Flip Logic ---
+    if direction == 1:
+        print("  Applying direction flip (180 - rlnAnglePsi)")
+        # Normalize ensures the resulting angle stays in [-180, 180]
+        df_working['rlnAnglePsi'] = df_working['rlnAnglePsi'].apply(lambda x: normalize_angle(x + 180))
+        
+        # Flip Tilt (Reverse direction along filament)
+        # Note: Tilt is typically in range [0, 180]
+        df_working['rlnAngleTilt'] = df_working['rlnAngleTilt'].apply(lambda x: 180.0 - x)
+
+    # --- Step 1 & 2: Template Mapping (if available) ---
+    if df_template is not None:
+        df_filtered = filter_by_lcc(df_working, df_template, angpix, neighbor_radius, lcc_keep_percent)
+        intermediates['filtered'] = df_filtered
+        
+        df_working = map_angles_from_template(df_working, df_filtered, angpix, neighbor_radius)
+        intermediates['mapped'] = df_working
+
+    # --- Step 3: Refinement & Smoothing ---
+    df_final = snap_angles_to_filament_median(df_working, snap_max_delta, snap_min_points)
     
-    # Stage 1: LCC filtering
-    df_filtered = filter_by_lcc(
-        df_input,
-        df_template,
-        angpix,
-        neighbor_radius,
-        lcc_keep_percent
-    )
-    intermediates['filtered'] = df_filtered
-    
-    # Stage 2: Angle mapping
-    df_mapped = map_angles_from_template(
-        df_input,
-        df_filtered,
-        angpix,
-        neighbor_radius
-    )
-    intermediates['mapped'] = df_mapped
-    
-    # Stage 3: Angle snapping
-    df_final = snap_angles_to_filament_median(
-        df_mapped,
-        snap_max_delta,
-        snap_min_points
-    )
-    
-    # Mapping angle for writing
+    # Final cleanup before smoothing
     df_final['rlnAnglePsi'] = normalize_angle(df_final['rlnAnglePsi'].values)
     df_final['rlnAngleRot'] = normalize_angle(df_final['rlnAngleRot'].values)
     
-    print(f"\n{'='*60}")
-    print("FILAMENT ANGLE SMOOTHING")
-    print(f"{'='*60}")
-    df_corrected = smooth_angles(df_final)
-    
-    print("\n" + "="*60)
-    print("PIPELINE COMPLETE")
-    print("="*60 + "\n")
+    df_corrected = smooth_angles(df_final) #
     
     return df_corrected, intermediates
-    
-    
