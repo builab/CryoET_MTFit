@@ -620,7 +620,9 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         df_connected = run_connection(df_cleaned, args, step_num=3)
         
         # Load template for prediction
-        df_template = read_star(args.template)
+        df_template = None
+        if args.template is not None:
+            df_template = read_star(args.template)
         
         df_final = run_prediction(df_connected, df_template, args, step_num=4)
         
