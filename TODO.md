@@ -67,5 +67,6 @@ v.0.9.13
  - Add to predict.py with option to not predict with direction (Good for singlet microtubule)
  
 
-TODO: Add microtubule twist for picking (change further)
-TODO: Add straightness fitting
+TODO: Add microtubule twist for predict.
+TODO: Add fitting mod based on either selected particles in ArtiaX or Add points and Fit. 
+TODO: Add straightness fitting (not too important right now)
