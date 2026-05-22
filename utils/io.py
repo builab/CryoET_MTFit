@@ -6,6 +6,7 @@ I/O utilities for STAR file processing.
 @Builab 2025
 """
 
+import json
 import os
 import re
 from typing import Tuple, Optional
@@ -125,11 +126,108 @@ def read_star(file_path: str) -> pd.DataFrame:
 def write_star(df: pd.DataFrame, file_path: str, overwrite: bool = True) -> None:
     """
     Write DataFrame to STAR file.
-    
+
     Args:
         df: DataFrame to write.
         file_path: Output file path.
         overwrite: Whether to overwrite existing file.
     """
-    starfile.write(df, file_path, overwrite=overwrite)
+    out = df.copy()
+    # ArtiaX requires rlnImagePixelSize; mirror from rlnDetectorPixelSize if present
+    if 'rlnDetectorPixelSize' in out.columns and 'rlnImagePixelSize' not in out.columns:
+        out['rlnImagePixelSize'] = out['rlnDetectorPixelSize']
+    starfile.write(out, file_path, overwrite=overwrite)
+
+
+def _euler_zyz_to_matrix(rot_deg: float, tilt_deg: float, psi_deg: float) -> np.ndarray:
+    """Convert RELION ZYZ Euler angles to 3x3 rotation matrix R = Rz(psi)·Ry(tilt)·Rz(rot)."""
+    rot  = np.radians(rot_deg)
+    tilt = np.radians(tilt_deg)
+    psi  = np.radians(psi_deg)
+
+    Rz1 = np.array([[ np.cos(rot), -np.sin(rot), 0],
+                    [ np.sin(rot),  np.cos(rot), 0],
+                    [ 0,            0,            1]])
+    Ry  = np.array([[ np.cos(tilt), 0, np.sin(tilt)],
+                    [ 0,            1, 0            ],
+                    [-np.sin(tilt), 0, np.cos(tilt)]])
+    Rz2 = np.array([[ np.cos(psi), -np.sin(psi), 0],
+                    [ np.sin(psi),  np.cos(psi), 0],
+                    [ 0,            0,            1]])
+    return Rz2 @ Ry @ Rz1
+
+
+def write_copick(
+    df: pd.DataFrame,
+    output_dir: str,
+    object_name: str = "microtubule",
+    user_id: str = "mtfit",
+    session_id: str = "0",
+) -> None:
+    """
+    Write particle picks to copick JSON format (one file per tomogram).
+
+    Coordinates are converted from pixels to Ångström using rlnDetectorPixelSize.
+    RELION ZYZ Euler angles are converted to 4x4 homogeneous transformation matrices.
+    rlnHelicalTubeID is preserved as instance_id.
+
+    Args:
+        df: DataFrame with rlnCoordinateX/Y/Z, rlnAngleRot/Tilt/Psi,
+            rlnHelicalTubeID, rlnTomoName or rlnMicrographName, rlnDetectorPixelSize.
+        output_dir: Directory to write JSON files.
+        object_name: Copick pickable object name.
+        user_id: Copick user ID.
+        session_id: Copick session ID.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    tomo_col = next((c for c in ('rlnTomoName', 'rlnMicrographName') if c in df.columns), None)
+    if tomo_col is None:
+        raise ValueError("DataFrame must have rlnTomoName or rlnMicrographName column")
+
+    has_pixel_size = 'rlnDetectorPixelSize' in df.columns
+
+    for tomo_name, tomo_df in df.groupby(tomo_col):
+        pixel_size = float(tomo_df['rlnDetectorPixelSize'].iloc[0]) if has_pixel_size else 1.0
+
+        points = []
+        for _, row in tomo_df.iterrows():
+            x_ang = float(row['rlnCoordinateX']) * pixel_size
+            y_ang = float(row['rlnCoordinateY']) * pixel_size
+            z_ang = float(row['rlnCoordinateZ']) * pixel_size
+
+            R = _euler_zyz_to_matrix(
+                float(row.get('rlnAngleRot',  0.0)),
+                float(row.get('rlnAngleTilt', 0.0)),
+                float(row.get('rlnAnglePsi',  0.0)),
+            )
+            transform = [
+                [R[0, 0], R[0, 1], R[0, 2], x_ang],
+                [R[1, 0], R[1, 1], R[1, 2], y_ang],
+                [R[2, 0], R[2, 1], R[2, 2], z_ang],
+                [0.0,     0.0,     0.0,     1.0  ],
+            ]
+
+            points.append({
+                "location":       {"x": x_ang, "y": y_ang, "z": z_ang},
+                "transformation": transform,
+                "instance_id":    int(row.get('rlnHelicalTubeID', 0)),
+                "score":          float(row.get('rlnMaxValueProbDistribution', 0.0)),
+            })
+
+        picks = {
+            "pickable_object_name": object_name,
+            "user_id":              user_id,
+            "session_id":           session_id,
+            "run_name":             str(tomo_name),
+            "voxel_spacing":        pixel_size,
+            "unit":                 "angstrom",
+            "points":               points,
+        }
+
+        out_file = os.path.join(output_dir, f"{tomo_name}_{object_name}.json")
+        with open(out_file, 'w') as f:
+            json.dump(picks, f, indent=2)
+
+        print(f"  Wrote {len(points)} picks → {out_file}")
 

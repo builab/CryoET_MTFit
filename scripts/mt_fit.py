@@ -32,7 +32,7 @@ from utils.clean import (
 )
     
 from utils.predict import predict_angles
-from utils.io import read_star, write_star, validate_dataframe, load_coordinates
+from utils.io import read_star, write_star, validate_dataframe, load_coordinates, write_copick
 
 # =============================================================================
 # CONSTANTS
@@ -490,16 +490,30 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         
         # Save output
         if not df_final.empty:
-            write_star(df_final, output_file, overwrite=True)
-            
+            fmt = getattr(args, 'output_format', 'star')
+
+            if fmt in ('star', 'both'):
+                write_star(df_final, output_file, overwrite=True)
+
+            if fmt in ('copick', 'both'):
+                copick_dir = getattr(args, 'copick_dir', None) or \
+                             f"{os.path.splitext(args.input)[0]}_copick"
+                copick_object = getattr(args, 'copick_object', 'microtubule')
+                write_copick(df_final, copick_dir, object_name=copick_object)
+
             print("\n" + "="*80)
             print("PIPELINE COMPLETE")
             print("="*80)
-            print_summary("Final Output", [
-                f"File: {output_file}",
+            output_lines = [
                 f"Tubes: {df_final['rlnHelicalTubeID'].nunique()}",
-                f"Particles: {len(df_final)}"
-            ])
+                f"Particles: {len(df_final)}",
+            ]
+            if fmt in ('star', 'both'):
+                output_lines.insert(0, f"STAR file: {output_file}")
+            if fmt in ('copick', 'both'):
+                output_lines.insert(0 if fmt == 'copick' else 1,
+                                    f"Copick dir: {copick_dir}")
+            print_summary("Final Output", output_lines)
         else:
             print_warning("Pipeline produced no output particles")
             sys.exit(1)
@@ -585,7 +599,16 @@ Examples:
     
     # Prediction arguments for pipeline
     add_predict_arguments(pipeline_parser)
-    
+
+    # Output format
+    pipeline_parser.add_argument('--output_format', choices=['star', 'copick', 'both'],
+                                default='star',
+                                help='Output format (default: star)')
+    pipeline_parser.add_argument('--copick_dir', type=str, default=None,
+                                help='Output directory for copick JSON files (default: <input_stem>_copick/)')
+    pipeline_parser.add_argument('--copick_object', type=str, default='microtubule',
+                                help='Copick pickable object name (default: microtubule)')
+
     pipeline_parser.set_defaults(func=cmd_pipeline)
     
     # Parse arguments
