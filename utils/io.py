@@ -6,7 +6,6 @@ I/O utilities for STAR file processing.
 @Builab 2025
 """
 
-import json
 import os
 import re
 from typing import Tuple, Optional
@@ -139,24 +138,6 @@ def write_star(df: pd.DataFrame, file_path: str, overwrite: bool = True) -> None
     starfile.write(out, file_path, overwrite=overwrite)
 
 
-def _euler_zyz_to_matrix(rot_deg: float, tilt_deg: float, psi_deg: float) -> np.ndarray:
-    """Convert RELION ZYZ Euler angles to 3x3 rotation matrix R = Rz(psi)·Ry(tilt)·Rz(rot)."""
-    rot  = np.radians(rot_deg)
-    tilt = np.radians(tilt_deg)
-    psi  = np.radians(psi_deg)
-
-    Rz1 = np.array([[ np.cos(rot), -np.sin(rot), 0],
-                    [ np.sin(rot),  np.cos(rot), 0],
-                    [ 0,            0,            1]])
-    Ry  = np.array([[ np.cos(tilt), 0, np.sin(tilt)],
-                    [ 0,            1, 0            ],
-                    [-np.sin(tilt), 0, np.cos(tilt)]])
-    Rz2 = np.array([[ np.cos(psi), -np.sin(psi), 0],
-                    [ np.sin(psi),  np.cos(psi), 0],
-                    [ 0,            0,            1]])
-    return Rz2 @ Ry @ Rz1
-
-
 def write_copick(
     df: pd.DataFrame,
     output_dir: str,
@@ -168,7 +149,8 @@ def write_copick(
     Write particle picks to copick JSON format (one file per tomogram).
 
     Coordinates are converted from pixels to Ångström using rlnDetectorPixelSize.
-    RELION ZYZ Euler angles are converted to 4x4 homogeneous transformation matrices.
+    RELION ZYZ Euler angles are converted to 4x4 transformation matrices following
+    the copick convention (inverted rotation, matching relion_df_to_picks).
     rlnHelicalTubeID is preserved as instance_id.
 
     Args:
@@ -179,6 +161,9 @@ def write_copick(
         user_id: Copick user ID.
         session_id: Copick session ID.
     """
+    from copick.models import CopickPicksFile, CopickPoint, CopickLocation
+    from scipy.spatial.transform import Rotation
+
     os.makedirs(output_dir, exist_ok=True)
 
     tomo_col = next((c for c in ('rlnTomoName', 'rlnMicrographName') if c in df.columns), None)
@@ -186,6 +171,7 @@ def write_copick(
         raise ValueError("DataFrame must have rlnTomoName or rlnMicrographName column")
 
     has_pixel_size = 'rlnDetectorPixelSize' in df.columns
+    has_angles = {'rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi'}.issubset(df.columns)
 
     for tomo_name, tomo_df in df.groupby(tomo_col):
         pixel_size = float(tomo_df['rlnDetectorPixelSize'].iloc[0]) if has_pixel_size else 1.0
@@ -196,11 +182,12 @@ def write_copick(
             y_ang = float(row['rlnCoordinateY']) * pixel_size
             z_ang = float(row['rlnCoordinateZ']) * pixel_size
 
-            R = _euler_zyz_to_matrix(
-                float(row.get('rlnAngleRot',  0.0)),
-                float(row.get('rlnAngleTilt', 0.0)),
-                float(row.get('rlnAnglePsi',  0.0)),
-            )
+            if has_angles:
+                angles = [row['rlnAngleRot'], row['rlnAngleTilt'], row['rlnAnglePsi']]
+                R = Rotation.from_euler("ZYZ", angles, degrees=True).inv().as_matrix()
+            else:
+                R = np.eye(3)
+
             transform = [
                 [R[0, 0], R[0, 1], R[0, 2], x_ang],
                 [R[1, 0], R[1, 1], R[1, 2], y_ang],
@@ -208,26 +195,26 @@ def write_copick(
                 [0.0,     0.0,     0.0,     1.0  ],
             ]
 
-            points.append({
-                "location":       {"x": x_ang, "y": y_ang, "z": z_ang},
-                "transformation": transform,
-                "instance_id":    int(row.get('rlnHelicalTubeID', 0)),
-                "score":          float(row.get('rlnMaxValueProbDistribution', 0.0)),
-            })
+            points.append(CopickPoint(
+                location=CopickLocation(x=x_ang, y=y_ang, z=z_ang),
+                transformation_=transform,
+                instance_id=int(row.get('rlnHelicalTubeID', 0)),
+                score=float(row.get('rlnMaxValueProbDistribution', 0.0)),
+            ))
 
-        picks = {
-            "pickable_object_name": object_name,
-            "user_id":              user_id,
-            "session_id":           session_id,
-            "run_name":             str(tomo_name),
-            "voxel_spacing":        pixel_size,
-            "unit":                 "angstrom",
-            "points":               points,
-        }
+        picks_file = CopickPicksFile(
+            pickable_object_name=object_name,
+            user_id=user_id,
+            session_id=session_id,
+            run_name=str(tomo_name),
+            voxel_spacing=pixel_size,
+            unit="angstrom",
+            points=points,
+        )
 
         out_file = os.path.join(output_dir, f"{tomo_name}_{object_name}.json")
         with open(out_file, 'w') as f:
-            json.dump(picks, f, indent=2)
+            f.write(picks_file.model_dump_json(indent=2))
 
         print(f"  Wrote {len(points)} picks → {out_file}")
 
