@@ -28,6 +28,9 @@ DEFAULT_MAX_NEIGHBORS = 8
 DEFAULT_SNAP_MAX_DELTA = 20.0  # degrees
 DEFAULT_MIN_FILAMENT_POINTS = 5
 
+def normalize_angle(angle: float) -> float:
+    """Normalize angle to range [-180, 180]."""
+    return ((angle + 180) % 360) - 180
 
 def circular_mean(angles: np.ndarray, weights: Optional[np.ndarray] = None) -> float:
     """
@@ -103,8 +106,10 @@ def filter_by_lcc(
     """
     # Validate inputs
     validate_dataframe(df_input, COORD_COLUMNS + ['rlnHelicalTubeID'])
-    validate_dataframe(df_template, COORD_COLUMNS + ['rlnLCCmax'])
+    validate_dataframe(df_template, COORD_COLUMNS)
     
+    has_lcc = 'rlnLCCmax' in df_template.columns
+    	
     if not 0 < keep_percentage <= 100:
         raise ValueError(
             f"keep_percentage must be in (0, 100], got {keep_percentage}"
@@ -117,8 +122,11 @@ def filter_by_lcc(
     print("LCC FILTERING")
     print(f"{'='*60}")
     print(f"  Radius: {neighbor_radius:.1f} Å ({radius_px:.2f} px)")
-    print(f"  Keeping top {keep_percentage}% by LCC score")
-    
+    if has_lcc:
+        print(f"  Keeping top {keep_percentage}% by LCC score")
+    else:
+        print(f"  ⚠ No rlnLCCmax column - keeping all neighbors")
+            
     # Build spatial index for template particles
     template_coords = df_template[COORD_COLUMNS].to_numpy(dtype=float)
     kdtree = cKDTree(template_coords)
@@ -150,11 +158,14 @@ def filter_by_lcc(
         neighbor_mask[list(neighbor_indices)] = True
         neighbors_df = df_template[neighbor_mask]
         
-        # Keep top percentage by LCC score
-        neighbors_sorted = neighbors_df.sort_values('rlnLCCmax', ascending=False)
-        n_keep = max(1, int(np.ceil(len(neighbors_sorted) * keep_percentage / 100.0)))
-        top_particles = neighbors_sorted.iloc[:n_keep]
-        
+        if 'rlnLCCmax' in df_template.columns:
+            # Keep top percentage by LCC score
+            neighbors_sorted = neighbors_df.sort_values('rlnLCCmax', ascending=False)
+            n_keep = max(1, int(np.ceil(len(neighbors_sorted) * keep_percentage / 100.0)))
+            top_particles = neighbors_sorted.iloc[:n_keep]
+        else:
+            top_particles = neighbors_df
+            
         indices_to_keep.update(top_particles.index)
     
     # Create filtered DataFrame
@@ -342,75 +353,206 @@ def snap_angles_to_filament_median(
     
     return df_output
 
+def fit_polynomial(x, y, order=2):
+    """
+    Fit polynomial to data.
+    
+    Returns:
+        Tuple of (fitted_y, residuals, rmse, poly_object)
+    """
+    # Ensure there is enough data for fitting (at least order + 1 points)
+    if len(x) <= order:
+        return np.full_like(y, np.nan), np.full_like(y, np.nan), np.nan, None
+
+    coeffs = np.polyfit(x, y, order)
+    poly = np.poly1d(coeffs)
+    fitted_y = poly(x)
+    residuals = y - fitted_y
+    rmse = np.sqrt(np.mean(residuals**2))
+    return fitted_y, residuals, rmse, poly
+
+
+def robust_mad_outlier_detection(residuals, threshold=3.5):
+    """
+    Detects outliers using the Modified Z-score based on the Median Absolute Deviation (MAD).
+    """
+    if len(residuals) < 5: 
+        return np.zeros_like(residuals, dtype=bool)
+
+    median_residual = np.median(residuals)
+    mad = np.median(np.abs(residuals - median_residual))
+    
+    if mad == 0:
+        return np.abs(residuals - median_residual) > 1e-6 
+
+    # 0.6745 is the correction factor for consistency with Gaussian Z-score
+    modified_z_score = 0.6745 * (residuals - median_residual) / mad
+    
+    is_outlier = np.abs(modified_z_score) > threshold
+    return is_outlier
+
+
+def iterative_fit_and_detect(particle_indices, angles, order=2, n_iterations=2):
+    """
+    Performs iterative polynomial fitting and MAD outlier detection (2 steps).
+    
+    Returns:
+        Tuple: (final_fitted_angles, total_outliers_mask)
+    """
+    
+    N = len(angles)
+    total_outliers_mask = np.zeros(N, dtype=bool)
+    current_inlier_indices = np.arange(N)
+    
+    final_fitted_angles = np.full(N, np.nan)
+    final_rmse = np.nan
+    final_poly = None
+    
+    for i in range(n_iterations):
+        
+        # 1. Get current inlier data
+        x_in = particle_indices[current_inlier_indices]
+        y_in = angles[current_inlier_indices]
+        
+        # Skip if not enough data remains
+        if len(x_in) <= order:
+            break
+            
+        # 2. Fit polynomial to inliers and get the poly object
+        _, _, _, poly = fit_polynomial(x_in, y_in, order)
+        
+        # 3. Calculate fitted line and residuals for ALL original points
+        fitted_angles_all = poly(particle_indices)
+        residuals_all = angles - fitted_angles_all
+        
+        # 4. Detect outliers among the current inliers
+        residuals_for_detection = residuals_all[current_inlier_indices]
+        is_outlier_in_subset = robust_mad_outlier_detection(residuals_for_detection)
+        
+        # 5. Map detected outliers back to the original index space
+        outlier_indices_original = current_inlier_indices[is_outlier_in_subset]
+        
+        # 6. Break if no new outliers found
+        if len(outlier_indices_original) == 0:
+            final_fitted_angles = fitted_angles_all
+            final_poly = poly
+            final_rmse = np.sqrt(np.mean((angles[~total_outliers_mask] - fitted_angles_all[~total_outliers_mask])**2))
+            break
+            
+        # 7. Update the total outlier mask
+        total_outliers_mask[outlier_indices_original] = True
+        
+        # 8. Update the current inlier indices for the next iteration
+        current_inlier_indices = np.where(~total_outliers_mask)[0]
+        
+        # 9. Record final results if this is the last iteration
+        if i == n_iterations - 1:
+            final_fitted_angles = fitted_angles_all
+            final_poly = poly
+            final_rmse = np.sqrt(np.mean((angles[~total_outliers_mask] - fitted_angles_all[~total_outliers_mask])**2))
+
+    # Return only the essential items for correction
+    return total_outliers_mask, final_poly
+
+
+def smooth_angles(df):
+    """
+    Reads star df, performs iterative angle correction, and returns the corrected df.
+    Prints the total number of detected and corrected outlier particles.
+    """    
+    df_corrected = df.copy()
+    grouped = df.groupby('rlnHelicalTubeID')
+    
+    angle_names = ['rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi']
+    
+    # Initialize counter
+    total_outliers_corrected = 0 
+
+    # --- Iterative Correction Loop ---
+    for tube_id, tube_data in grouped:
+        particle_indices = np.arange(len(tube_data))
+        tube_masks = {}
+        tube_polys = {}
+        
+        # 1. Run iterative fit and detection for all three angles
+        for angle_col in angle_names:
+            angles = tube_data[angle_col].values
+            
+            # Get the mask and polynomial object
+            total_outliers_mask, final_poly = \
+                iterative_fit_and_detect(particle_indices, angles, order=2, n_iterations=2)
+            
+            tube_masks[angle_col] = total_outliers_mask
+            tube_polys[angle_col] = final_poly
+
+        # 2. Global Outlier Identification (Flag if outlier in ANY angle)
+        global_outlier_mask = np.zeros(len(tube_data), dtype=bool)
+        for angle in angle_names:
+             global_outlier_mask = global_outlier_mask | tube_masks[angle]
+
+        # 3. Extrapolation and Data Replacement
+        if global_outlier_mask.any():
+            # Count outliers for this tube and add to total
+            outlier_count = global_outlier_mask.sum()
+            total_outliers_corrected += outlier_count
+            
+            indices_in_tube = tube_data.index
+            outlier_indices_original_df = indices_in_tube[global_outlier_mask]
+            outlier_indices_local = particle_indices[global_outlier_mask]
+            
+            for angle in angle_names:
+                poly = tube_polys[angle]
+                # Calculate new (extrapolated) values using the final robust fit
+                extrapolated_values = poly(outlier_indices_local)
+                
+                # Replace the values in the corrected DataFrame copy
+                df_corrected.loc[outlier_indices_original_df, angle] = extrapolated_values
+	
+    # Print summary
+    print(f"  Total outlier found and corrected: {total_outliers_corrected}")
+    
+    return df_corrected
+
 
 def predict_angles(
     df_input: pd.DataFrame,
-    df_template: pd.DataFrame,
-    angpix: float,
-    neighbor_radius: float = DEFAULT_MAPPING_RADIUS,
-    lcc_keep_percent: float = DEFAULT_LCC_KEEP_PERCENT,
-    snap_max_delta: float = DEFAULT_SNAP_MAX_DELTA,
-    snap_min_points: int = DEFAULT_MIN_FILAMENT_POINTS
+    df_template: Optional[pd.DataFrame] = None,
+    angpix: float = 14.0,
+    neighbor_radius: float = 100.0,
+    lcc_keep_percent: float = 80.0,
+    snap_max_delta: float = 20.0,
+    snap_min_points: int = 5,
+    direction: int = 0
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
-    """
-    Complete angle prediction pipeline.
     
-    Executes three-stage pipeline:
-    1. Filter template by LCC scores
-    2. Map angles from template to input
-    3. Snap outlier angles to filament medians
-    
-    Args:
-        df_input: Input particles to predict angles for.
-        df_template: Template particles with known angles and LCC scores.
-        angpix: Pixel size in Angstroms.
-        neighbor_radius: Search radius in Angstroms for filtering and mapping.
-        lcc_keep_percent: Percentage of top LCC particles to keep.
-        snap_max_delta: Maximum angular deviation before snapping.
-        snap_min_points: Minimum points per filament for snapping.
-    
-    Returns:
-        Tuple of (final_dataframe, intermediates_dict) where intermediates
-        contains 'filtered' and 'mapped' DataFrames.
-    """
-    print("\n" + "="*60)
-    print("ANGLE PREDICTION PIPELINE")
-    print("="*60)
-    print(f"  Input particles: {len(df_input)}")
-    print(f"  Template particles: {len(df_template)}")
-    
+    df_working = df_input.copy()
     intermediates = {}
+
+    # --- New: Direction Flip Logic ---
+    if direction == 1:
+        print("  Applying direction flip (180 - rlnAnglePsi)")
+        # Normalize ensures the resulting angle stays in [-180, 180]
+        df_working['rlnAnglePsi'] = df_working['rlnAnglePsi'].apply(lambda x: normalize_angle(x + 180))
+        
+        # Flip Tilt (Reverse direction along filament)
+        # Note: Tilt is typically in range [0, 180]
+        df_working['rlnAngleTilt'] = df_working['rlnAngleTilt'].apply(lambda x: 180.0 - x)
+
+    # --- Step 1 & 2: Template Mapping (if available) ---
+    if df_template is not None:
+        df_filtered = filter_by_lcc(df_working, df_template, angpix, neighbor_radius, lcc_keep_percent)
+        intermediates['filtered'] = df_filtered
+        
+        df_working = map_angles_from_template(df_working, df_filtered, angpix, neighbor_radius)
+        intermediates['mapped'] = df_working
+
+    # --- Step 3: Refinement & Smoothing ---
+    df_final = snap_angles_to_filament_median(df_working, snap_max_delta, snap_min_points)
     
-    # Stage 1: LCC filtering
-    df_filtered = filter_by_lcc(
-        df_input,
-        df_template,
-        angpix,
-        neighbor_radius,
-        lcc_keep_percent
-    )
-    intermediates['filtered'] = df_filtered
+    # Final cleanup before smoothing
+    df_final['rlnAnglePsi'] = normalize_angle(df_final['rlnAnglePsi'].values)
+    df_final['rlnAngleRot'] = normalize_angle(df_final['rlnAngleRot'].values)
     
-    # Stage 2: Angle mapping
-    df_mapped = map_angles_from_template(
-        df_input,
-        df_filtered,
-        angpix,
-        neighbor_radius
-    )
-    intermediates['mapped'] = df_mapped
+    df_corrected = smooth_angles(df_final) #
     
-    # Stage 3: Angle snapping
-    df_final = snap_angles_to_filament_median(
-        df_mapped,
-        snap_max_delta,
-        snap_min_points
-    )
-    
-    print("\n" + "="*60)
-    print("PIPELINE COMPLETE")
-    print("="*60 + "\n")
-    
-    return df_final, intermediates
-    
-    
+    return df_corrected, intermediates

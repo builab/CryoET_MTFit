@@ -18,6 +18,8 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
+PRECOMPUTE_DISTANCE_THRESHOLD=3000
+EVALUATION_STEP_SIZE = 40.0 # In Angstrom
 
 def distance(p1: np.ndarray, p2: np.ndarray) -> float:
     """Calculate Euclidean distance between two points (2D or 3D)."""
@@ -127,7 +129,7 @@ def angle_evaluate(
     mode: int,
     angpix: float,
     max_angle_change_per_4nm: float,
-    integration_step: float = 1.0 
+    integration_step: float = 0.1 
 ) -> int:
     """
     Evaluate curvature of polynomial fit.
@@ -135,7 +137,7 @@ def angle_evaluate(
     Returns:
         1 if curvature is acceptable, 0 otherwise.
     """
-    evaluation_step = 40 / angpix
+    evaluation_step = EVALUATION_STEP_SIZE / angpix
     step = integration_step
     
     def get_next_pos(val: float) -> Tuple[float, float]:
@@ -174,8 +176,8 @@ def resample(
     cluster_id: int,
     tomo_name: str,
     sample_step: float,
-    detector_pixel_size: Optional[float] = None,
-    integration_step: float = 1.0 
+    angpix: float,
+    integration_step: float = 0.1 
 ) -> List[Dict[str, Any]]:
     """Resample points along fitted 3D curve at specified step size."""
     resampled_points = []
@@ -208,7 +210,8 @@ def resample(
             d_xy = np.sqrt(dx**2 + dy**2)
             
             # Angle in XY plane (rlnAngleYX)
-            angle_yx = math.degrees(math.atan2(dy, dx))
+            # @Builab proper Relion angle calculation
+            angle_yx = math.degrees(math.atan2(-dy, dx))
             
             # Angle with respect to XY plane (rlnAngleZXY)
             dz = next_pos[2] - current_pos[2]
@@ -222,11 +225,9 @@ def resample(
                 'rlnAngleTilt': angle_zxy + 90,
                 'rlnAnglePsi': angle_yx,
                 'rlnHelicalTubeID': cluster_id + 1,
-                'rlnTomoName': tomo_name
+                'rlnTomoName': tomo_name,
+                'rlnImagePixelSize': angpix
             }
-            
-            if detector_pixel_size is not None:
-                point_data['rlnDetectorPixelSize'] = detector_pixel_size
                 
             resampled_points.append(point_data)
 
@@ -252,8 +253,7 @@ def seed_extension(
     max_distance_in_extension: float,
     min_number_growth: int,
     sample_step: float,
-    detector_pixel_size: Optional[float] = None,
-    integration_step: float = 1.0 
+    integration_step: float = 0.1 
 ) -> Tuple[List[int], List[Dict[str, Any]]]:
     """
     Extend seed by iteratively fitting polynomial and adding nearby points.
@@ -294,10 +294,10 @@ def seed_extension(
         return [], []
 
     # --- Curve Growth ---
-    max_iterations = 100  # Prevent infinite loops
+    MAX_ITERATIONS = 100  # Prevent infinite loops
     iteration = 0
     
-    while iteration < max_iterations:
+    while iteration < MAX_ITERATIONS:
         iteration += 1
         grew = False
         unassigned_indices = np.where(assigned_clusters == -1)[0]
@@ -351,7 +351,7 @@ def seed_extension(
             
             # Add all valid points at once
             if len(valid_indices) > 0:
-                cluster_indices.extend(valid_indices.tolist())
+                cluster_indices.extend(valid_indices)
                 assigned_clusters[valid_indices] = -2  # Provisional assignment
                 grew = True
 
@@ -379,7 +379,7 @@ def seed_extension(
         
         resampled_data = resample(
             poly_final_xy, poly_final_k, np.min(ind), np.max(ind),
-            mode, cluster_id, tomo_name, sample_step, detector_pixel_size
+            mode, cluster_id, tomo_name, sample_step, angpix
         )
         return cluster_indices, resampled_data
     else:
@@ -407,9 +407,8 @@ def fit_curves(
     min_distance_in_extension: float,
     max_distance_in_extension: float,
     min_number_growth: int,
-    detector_pixel_size: Optional[float] = None,
     cluster_id_offset: int = 0,
-    integration_step: float = 1.0 
+    integration_step: float = 0.1 
 ) -> Tuple[pd.DataFrame, np.ndarray, int]:
     """
     Core computational engine for curve fitting (I/O-free).
@@ -431,7 +430,6 @@ def fit_curves(
         min_distance_in_extension: Min distance between neighbors during growth (in pixels).
         max_distance_in_extension: Max distance between neighbors during growth (in pixels).
         min_number_growth: Min points to add during growth.
-        detector_pixel_size: Detector pixel size for output.
         cluster_id_offset: Offset for cluster IDs.
         integration_step: Integration step for curve length (in pixels).
 
@@ -445,7 +443,7 @@ def fit_curves(
 
     # Pre-compute 2D distance matrix for efficiency (if dataset is not too large)
     # Only compute if reasonable memory footprint (< ~10M distances)
-    use_precomputed_distances = total_number < 3000
+    use_precomputed_distances = total_number < PRECOMPUTE_DISTANCE_THRESHOLD
     dist_matrix_2d = None
     
     if use_precomputed_distances:
@@ -490,7 +488,7 @@ def fit_curves(
                     angpix, max_angle_change_per_4nm,
                     max_distance_to_curve, min_distance_in_extension,
                     max_distance_in_extension, min_number_growth,
-                    sample_step, detector_pixel_size
+                    sample_step
                 )
                 
                 if final_indices:

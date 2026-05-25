@@ -7,4 +7,4 @@ MTFIT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export MTFIT
 
 # Add script directory to PATH if needed
-export PATH="$MTFIT:$PATH"
+export PATH="$MTFIT/scripts:$PATH"

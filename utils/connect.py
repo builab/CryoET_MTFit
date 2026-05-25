@@ -16,7 +16,7 @@ from typing import Dict, Any, Tuple, Optional, List
 
 # Constants
 DEFAULT_MAX_EXTRAPOLATION_STEPS = 50
-INTEGRATION_STEP_DIVISOR = 10.0
+INTEGRATION_STEP_DIVISOR = 50.0
 MIN_POINTS_FOR_FITTING = 2
 
 
@@ -28,13 +28,13 @@ class TubeInfo:
         tube_id: int,
         coords: np.ndarray,
         tomo_name: str = "Unknown",
-        detector_pixel_size: Optional[float] = None
+        angpix: Optional[float] = None
     ):
         self.tube_id = tube_id
         self.coords = coords  # In Angstroms
         self.n_points = len(coords)
         self.tomo_name = tomo_name
-        self.detector_pixel_size = detector_pixel_size
+        self.angpix = angpix
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format for backwards compatibility."""
@@ -43,23 +43,8 @@ class TubeInfo:
             'coords': self.coords,
             'n_points': self.n_points,
             'tomo_name': self.tomo_name,
-            'detector_pixel_size': self.detector_pixel_size
+            'angpix': self.angpix
         }
-
-
-def euclidean_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """
-    Calculate Euclidean distance between two 3D points.
-    
-    Args:
-        p1: First point (3D array).
-        p2: Second point (3D array).
-    
-    Returns:
-        Euclidean distance.
-    """
-    return np.linalg.norm(p1 - p2)
-
 
 def extract_tube_info(
     df: pd.DataFrame,
@@ -83,6 +68,11 @@ def extract_tube_info(
     # Convert coordinates from pixels to Angstroms
     coords = tube_data[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values * angpix
     
+    # Check for NaN or invalid values
+    if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
+        print(f"  Warning: Tube {tube_id} contains NaN or infinite coordinates. Skipping.")
+        return None
+    
     if len(coords) < MIN_POINTS_FOR_FITTING:
         return None
     
@@ -93,13 +83,7 @@ def extract_tube_info(
         else "Unknown"
     )
     
-    detector_pixel_size = (
-        tube_data['rlnDetectorPixelSize'].iloc[0]
-        if 'rlnDetectorPixelSize' in tube_data.columns and not tube_data['rlnDetectorPixelSize'].empty
-        else None
-    )
-
-    return TubeInfo(tube_id, coords, tomo_name, detector_pixel_size)
+    return TubeInfo(tube_id, coords, tomo_name, angpix)
 
 
 def calculate_average_step_size(coords: np.ndarray, n_points: int) -> float:
@@ -130,7 +114,7 @@ def extrapolate_trajectory(
     poly_order: int
 ) -> Optional[np.ndarray]:
     """
-    Fit polynomial to seed points and extrapolate trajectory forward.
+    Fit polynomial to seed points and extrapolate trajectory forward. Fix NaN error
     
     Args:
         coords: Coordinate array (N x 3) in Angstroms.
@@ -145,6 +129,10 @@ def extrapolate_trajectory(
     
     # Validate input
     if n_points < poly_order + 1 or min_seed < poly_order + 1:
+        return None
+    
+    # Check for NaN values
+    if np.any(np.isnan(coords)):
         return None
     
     # Calculate number of extrapolation steps
@@ -168,10 +156,14 @@ def extrapolate_trajectory(
     for dim in range(3):
         y_fit = coords[seed_start_idx:, dim]
         
+        # Double-check lengths match (defensive programming)
+        if len(t_fit) != len(y_fit):
+            return None
+        
         try:
             coeffs = np.polyfit(t_fit, y_fit, poly_order)
             extrapolated_coords[:, dim] = np.polyval(coeffs, t_extrapolate)
-        except np.linalg.LinAlgError:
+        except (np.linalg.LinAlgError, ValueError):
             return None
     
     return extrapolated_coords
@@ -245,7 +237,7 @@ def assess_connection_compatibility(
     # Calculate direct endpoint distance
     endpoint1 = coords1[-1] if end1 == 'end' else coords1[0]
     endpoint2 = coords2[0] if end2 == 'start' else coords2[-1]
-    end_to_end_distance = euclidean_distance(endpoint1, endpoint2)
+    end_to_end_distance = np.linalg.norm(endpoint1 - endpoint2)
     
     # Prepare tube1 for extrapolation (reverse if connecting from start)
     if end1 == 'end':
@@ -342,7 +334,6 @@ def find_tube_connections(
                     dist_extrapolate,
                     poly_order
                 )
-                
                 if can_connect and min_dist < best_score:
                     best_score = min_dist
                     best_connection = {
@@ -476,12 +467,6 @@ def fit_and_resample_tube(
         else "Unknown"
     )
     
-    detector_pixel_size = (
-        tube_data['rlnDetectorPixelSize'].iloc[0]
-        if 'rlnDetectorPixelSize' in tube_data.columns and not tube_data['rlnDetectorPixelSize'].empty
-        else None
-    )
-    
     # Determine primary axis (dimension with largest range)
     ranges = np.ptp(coords, axis=0)
     
@@ -508,8 +493,8 @@ def fit_and_resample_tube(
     resampled_points = resample(
         poly_y, poly_z, start, end, mode,
         tube_id - 1,  # cluster_id is 0-indexed in original code
-        tomo_name, sample_step, integration_step,
-        detector_pixel_size
+        tomo_name, sample_step, angpix,
+        integration_step
     )
     
     # Convert coordinates back from Angstroms to pixels
@@ -566,7 +551,7 @@ def refit_and_resample_all_tubes(
     
     # Create output DataFrame
     df_output = pd.DataFrame(all_resampled)
-    
+        
     print(f"  ✓ Resampled {df_output['rlnHelicalTubeID'].nunique()} tubes "
           f"into {len(df_output)} particles")
     
@@ -574,11 +559,9 @@ def refit_and_resample_all_tubes(
     required_cols = [
         'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ',
         'rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi',
-        'rlnHelicalTubeID', 'rlnTomoName'
+        'rlnHelicalTubeID', 'rlnTomoName', 'rlnImagePixelSize'
     ]
     
-    if 'rlnDetectorPixelSize' in df_output.columns:
-        required_cols.append('rlnDetectorPixelSize')
     
     # Fill missing columns with defaults
     for col in required_cols:
@@ -586,6 +569,269 @@ def refit_and_resample_all_tubes(
             df_output[col] = 0.0
     
     return df_output[required_cols]
+    
+    
+def resolve_overlapping_tubes(
+    df: pd.DataFrame,
+    angpix: float,
+    overlap_dist: float,
+    poly_order_final: int,
+    sample_step: float,
+    min_overlap_points: int = 3,
+    contained_fraction: float = 0.7,
+    debug: bool = False,
+) -> pd.DataFrame:
+    """
+    Detect and merge heavily overlapping tube fragments.
+
+    Idea:
+      * If two tubes have many points closer than `overlap_dist` Ã,
+        and one tube is largely contained inside the other
+        (fraction of overlapping points >= contained_fraction),
+        treat them as one filament and merge them.
+      * Merging is done via existing merge + refit + resample pipeline,
+        so the final trajectory is smooth.
+
+    Args:
+        df: DataFrame after normal connect_tubes() iterations.
+        angpix: Pixel size in Angstroms.
+        overlap_dist: Distance threshold in Ã to consider points overlapping.
+        poly_order_final: Poly order for final refit.
+        sample_step: Resampling step size in Ã.
+        min_overlap_points: Minimum number of overlapping points
+                            before we consider a pair.
+        contained_fraction: Minimum fraction of a tube's points that must be
+                            overlapping to be treated as a duplicate fragment.
+        debug: If True, print detailed info for each overlapping pair.
+
+    Returns:
+        DataFrame with overlapping tube fragments merged and resampled.
+    """
+    if df.empty:
+        return df
+
+    tube_ids = sorted(df['rlnHelicalTubeID'].unique())
+    connections: List[Dict[str, Any]] = []
+
+    print("\n" + "=" * 60)
+    print("Resolving heavily overlapping tube fragments")
+    print("=" * 60)
+
+    for i, tube1 in enumerate(tube_ids):
+        df1 = df[df['rlnHelicalTubeID'] == tube1]
+        if len(df1) < 2:
+            continue
+
+        coords1 = df1[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values * angpix
+
+        for tube2 in tube_ids[i + 1:]:
+            df2 = df[df['rlnHelicalTubeID'] == tube2]
+            if len(df2) < 2:
+                continue
+
+            coords2 = df2[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values * angpix
+
+            # Pairwise distances between all points in tube1 and tube2
+            diff = coords1[:, None, :] - coords2[None, :, :]
+            dists = np.linalg.norm(diff, axis=2)
+
+            min1 = dists.min(axis=1)  # nearest point on tube2 for each tube1 point
+            min2 = dists.min(axis=0)  # nearest point on tube1 for each tube2 point
+
+            overlap_mask1 = min1 < overlap_dist
+            overlap_mask2 = min2 < overlap_dist
+
+            count1 = int(overlap_mask1.sum())
+            count2 = int(overlap_mask2.sum())
+
+            if max(count1, count2) < min_overlap_points:
+                # Not enough overlapping points to care
+                continue
+
+            frac1 = count1 / len(coords1)
+            frac2 = count2 / len(coords2)
+
+            # Only consider pairs where one tube is largely contained inside the other
+            if max(frac1, frac2) < contained_fraction:
+                # Likely just a short crossing; leave as separate tubes
+                continue
+
+            min_overlap = float(dists.min())
+            connections.append(
+                {
+                    "tube_id1": int(tube1),
+                    "tube_id2": int(tube2),
+                    "min_overlap_dist": min_overlap,
+                }
+            )
+
+            if debug:
+                print(
+                    f"  Candidate overlap: {tube1} â {tube2}  "
+                    f"min_dist={min_overlap:.1f} Ã  "
+                    f"frac1={frac1:.2f}, frac2={frac2:.2f}"
+                )
+
+    if not connections:
+        print("  No heavy overlaps detected")
+        return df
+
+    print(f"  Found {len(connections)} overlapping tube pairs to merge")
+
+    # Merge and refit using the existing pipeline utilities
+    df_merged, _ = merge_connected_tubes(df, connections)
+
+    print(f"  Merged {df['rlnHelicalTubeID'].nunique() - df_merged['rlnHelicalTubeID'].nunique()} tube groups")
+    print("  Refitting & resampling merged overlaps...")
+
+    df_final = refit_and_resample_all_tubes(
+        df_merged,
+        poly_order_final,
+        sample_step,
+        angpix,
+    )
+
+    return df_final
+
+
+def connect_tubes_once(
+    df: pd.DataFrame,
+    angpix: float,
+    overlap_threshold: float,
+    min_seed: int,
+    dist_extrapolate: float,
+    poly_order_seed: int,
+    poly_order_final: int,
+    sample_step: float,
+    debug: bool = False,
+) -> pd.DataFrame:
+    """
+    Single pass of tube connection pipeline.
+    
+    Executes one round of the tube connection pipeline:
+    1. Find and merge connections at the given extrapolation distance
+    2. Refit and resample merged tubes with polynomial curves
+    
+    Args:
+        df: DataFrame with particle data (coordinates in pixels).
+        angpix: Pixel size in Angstroms.
+        overlap_threshold: Maximum distance in Angstroms to consider tubes connected.
+        min_seed: Number of points to use for trajectory fitting.
+        dist_extrapolate: Distance to extrapolate trajectories in Angstroms.
+        poly_order_seed: Polynomial order for extrapolation fitting.
+        poly_order_final: Polynomial order for final curve fitting.
+        sample_step: Resampling step size in Angstroms.
+        debug: If True, print detailed distance information for all connections.
+    
+    Returns:
+        DataFrame with connected and resampled tubes (coordinates in pixels).
+    """
+    tubes_before = df['rlnHelicalTubeID'].nunique()
+    
+    # Find connections
+    connections = find_tube_connections(
+        df,
+        angpix,
+        overlap_threshold,
+        min_seed,
+        dist_extrapolate,
+        poly_order_seed
+    )
+
+    # Debug mode: show top 5 closest tube pairs (regardless of connection threshold)
+    if debug:
+        print(f"\n    {'='*56}")
+        print(f"    DEBUG: Top 5 closest tube pairs")
+        print(f"    {'='*56}")
+        
+        # Get all unique tube IDs
+        tube_ids = sorted(df['rlnHelicalTubeID'].unique())
+        
+        # Calculate pairwise distances between all tube endpoints
+        min_distances = []
+        for i, tube1 in enumerate(tube_ids):
+            for tube2 in tube_ids[i+1:]:
+                # Get endpoints for both tubes
+                df1 = df[df['rlnHelicalTubeID'] == tube1].copy()
+                df2 = df[df['rlnHelicalTubeID'] == tube2].copy()
+                
+                if len(df1) < 2 or len(df2) < 2:
+                    continue
+                
+                # Calculate minimum distance between any endpoints
+                coords1 = df1[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
+                coords2 = df2[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].values
+                
+                # Get first and last points
+                ends1 = np.array([coords1[0], coords1[-1]])
+                ends2 = np.array([coords2[0], coords2[-1]])
+                
+                # Calculate all endpoint-to-endpoint distances
+                min_dist = float('inf')
+                for end1 in ends1:
+                    for end2 in ends2:
+                        dist = np.linalg.norm((end1 - end2) * angpix)
+                        min_dist = min(min_dist, dist)
+                
+                min_distances.append({
+                    'tube1': tube1,
+                    'tube2': tube2,
+                    'distance': min_dist
+                })
+        
+        # Sort by distance and show top 5
+        min_distances.sort(key=lambda x: x['distance'])
+        for i, pair in enumerate(min_distances[:5], 1):
+            threshold_marker = "✓" if pair['distance'] <= overlap_threshold else "✗"
+            print(f"    {i}. Tubes {pair['tube1']:4d} ↔ {pair['tube2']:4d}: "
+                  f"{pair['distance']:6.1f} Å {threshold_marker}")
+        
+        print(f"    {'='*56}")
+        print(f"    (✓ = within threshold, ✗ = exceeds threshold)\n")
+    
+    if not connections:
+        print(f"    No connections found")
+        return df
+    
+    print(f"    Found {len(connections)} potential connections")
+    
+    # Debug mode: print all connection distances
+    if debug:
+        print(f"\n    {'='*56}")
+        print(f"    DEBUG: All connection distances")
+        print(f"    {'='*56}")
+        for i, conn in enumerate(connections, 1):
+            print(f"    {i:3d}. Tubes {conn['tube_id1']:4d} ↔ {conn['tube_id2']:4d}: "
+                  f"{conn['min_overlap_dist']:6.1f} Å")
+        print(f"    {'='*56}\n")
+    else:
+        # Show top 3 connections only
+        for i, conn in enumerate(connections[:3], 1):
+            print(f"      {i}. Tubes {conn['tube_id1']} ↔ {conn['tube_id2']}: "
+                  f"{conn['min_overlap_dist']:.1f} Å")
+        if len(connections) > 3:
+            print(f"      ... and {len(connections) - 3} more")
+    
+    # Merge connected tubes
+    df_merged, _ = merge_connected_tubes(df, connections)
+    
+    tubes_after = df_merged['rlnHelicalTubeID'].nunique()
+    merges = tubes_before - tubes_after
+    
+    print(f"    Merged {merges} tube groups")
+    print(f"    Remaining tubes: {tubes_after}")
+    
+    # Refit and resample
+    print(f"    Refitting and resampling...")
+    df_final = refit_and_resample_all_tubes(
+        df_merged,
+        poly_order_final,
+        sample_step,
+        angpix
+    )
+    
+    return df_final
+
 
 def connect_tubes(
     df: pd.DataFrame,
@@ -596,27 +842,30 @@ def connect_tubes(
     poly_order_seed: int,
     poly_order_final: int,
     sample_step: float,
-    max_iterations: int = 1,
-    dist_scale: float = 1.0
+    max_iterations: int = 2,
+    dist_scale: float = 1.0,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """
-    Complete tube connection pipeline with iterative extrapolation.
+    Complete tube connection pipeline with multiple rounds.
     
     Executes the full pipeline for connecting broken helical tubes:
-    1. Iteratively find and merge connections with increasing extrapolation distance
-    2. Refit and resample merged tubes with polynomial curves
+    1. Runs multiple rounds of connection attempts
+    2. Each round: find connections → merge → refit → resample
+    3. The refitting between rounds can reveal new connection opportunities
     
     Args:
         df: DataFrame with particle data (coordinates in pixels).
         angpix: Pixel size in Angstroms.
         overlap_threshold: Maximum distance in Angstroms to consider tubes connected.
         min_seed: Number of points to use for trajectory fitting.
-        dist_extrapolate: Initial distance to extrapolate trajectories in Angstroms.
+        dist_extrapolate: Distance to extrapolate trajectories in Angstroms.
         poly_order_seed: Polynomial order for extrapolation fitting.
         poly_order_final: Polynomial order for final curve fitting.
         sample_step: Resampling step size in Angstroms.
-        max_iterations: Maximum number of connection iterations (default: 1).
+        max_iterations: Maximum number of connection iterations (default: 2).
         dist_scale: Scaling factor for extrapolation distance per iteration (default: 1.0).
+        debug: If True, print detailed distance information for all connections.
     
     Returns:
         DataFrame with connected and resampled tubes (coordinates in pixels).
@@ -624,113 +873,93 @@ def connect_tubes(
     print("\n" + "="*60)
     print("TUBE CONNECTION PIPELINE")
     print("="*60)
-    
+        
     tubes_initial = df['rlnHelicalTubeID'].nunique()
     particles_initial = len(df)
     
+
     print(f"\nInitial data: {tubes_initial} tubes, {particles_initial} particles")
     print(f"\nConnection parameters:")
+    print(f"  Pixel Size:     {angpix:.1f} Å/pixel")
     print(f"  Overlap threshold:     {overlap_threshold:.1f} Å")
-    print(f"  Initial extrapolation: {dist_extrapolate:.1f} Å")
+    print(f"  Extrapolation distance: {dist_extrapolate:.1f} Å")
     print(f"  Distance scaling:      {dist_scale}x per iteration")
     print(f"  Max iterations:        {max_iterations}")
     print(f"  Seed points:           {min_seed}")
     print(f"  Seed poly order:       {poly_order_seed}")
     print(f"  Final poly order:      {poly_order_final}")
     print(f"  Resampling step:       {sample_step:.1f} Å")
+    if debug:
+        print(f"  Debug mode:            ON")
     
-    # Stage 1: Iterative connection
-    print(f"\n{'='*60}")
-    print("[1/2] ITERATIVE CONNECTION")
-    print(f"{'='*60}")
-    
+    # Multiple iterations of connection
     df_current = df.copy()
-    current_dist = dist_extrapolate
     total_merges = 0
+    current_dist = dist_extrapolate
     
     for iteration in range(1, max_iterations + 1):
-        print(f"\n  Iteration {iteration}/{max_iterations} (extrapolation: {current_dist:.1f} Å)")
+        print(f"\n{'='*60}")
+        print(f"ITERATION {iteration}/{max_iterations} (extrapolation: {current_dist:.1f} Å)")
+        print(f"{'='*60}")
         
         tubes_before = df_current['rlnHelicalTubeID'].nunique()
         
-        # Find connections
-        connections = find_tube_connections(
+        # Run one connection pass
+        df_current = connect_tubes_once(
             df_current,
             angpix,
             overlap_threshold,
             min_seed,
             current_dist,
-            poly_order_seed
+            poly_order_seed,
+            poly_order_final,
+            sample_step,
+            debug=debug
         )
         
-        if not connections:
-            print(f"    No connections found")
-            if iteration == 1:
-                print("\n✓ No connections needed - tubes are well separated")
-            else:
-                print(f"    Stopping iterations (converged)")
-            break
-        
-        print(f"    Found {len(connections)} potential connections")
-        
-        # Show top 3 connections
-        for i, conn in enumerate(connections[:3], 1):
-            print(f"      {i}. Tubes {conn['tube_id1']} ↔ {conn['tube_id2']}: "
-                  f"{conn['min_overlap_dist']:.1f} Å")
-        if len(connections) > 3:
-            print(f"      ... and {len(connections) - 3} more")
-        
-        # Merge connected tubes
-        df_current, _ = merge_connected_tubes(df_current, connections)
-        
+
         tubes_after = df_current['rlnHelicalTubeID'].nunique()
         merges_this_iter = tubes_before - tubes_after
         total_merges += merges_this_iter
         
-        print(f"    Merged {merges_this_iter} tube groups")
-        print(f"    Remaining tubes: {tubes_after}")
-        
-        # Check convergence
+        # Check if we should continue
         if merges_this_iter == 0:
-            print(f"    Converged (no new merges)")
+            if iteration == 1:
+                print(f"\n✓ No connections needed - tubes are well separated")
+            else:
+                print(f"\n✓ Converged (no new merges in iteration {iteration})")
             break
         
         # Scale distance for next iteration
         if iteration < max_iterations:
             current_dist *= dist_scale
-    
-    if total_merges > 0:
-        print(f"\n✓ Total merges across all iterations: {total_merges}")
-        print(f"  Tubes: {tubes_initial} → {df_current['rlnHelicalTubeID'].nunique()}")
-    
-    # Stage 2: Refit and resample
-    print(f"\n{'='*60}")
-    print(f"[2/2] REFITTING & RESAMPLING")
-    print(f"{'='*60}")
-    
-    if total_merges > 0:
-        df_final = refit_and_resample_all_tubes(
-            df_current,
-            poly_order_final,
-            sample_step,
-            angpix
-        )
-    else:
-        print("\n✓ No changes made - skipping refit")
-        df_final = df_current
-    
+            
+    # Final pass: merge heavily overlapping duplicate fragments
+    df_current = resolve_overlapping_tubes(
+        df_current,
+        angpix=angpix,
+        overlap_dist=overlap_threshold,
+        poly_order_final=poly_order_final,
+        sample_step=sample_step,
+        min_overlap_points=3,         # you can tune this
+        contained_fraction=0.7,       # you can tune this
+        debug=True,
+    )
+
     # Final summary
-    tubes_final = df_final['rlnHelicalTubeID'].nunique()
-    particles_final = len(df_final)
+    tubes_final = df_current['rlnHelicalTubeID'].nunique()
+    particles_final = len(df_current)
     tubes_merged = tubes_initial - tubes_final
+    
     
     print("\n" + "="*60)
     print("CONNECTION PIPELINE COMPLETE")
     print("="*60)
-    print(f"  Tubes merged:  {tubes_merged}")
-    print(f"  Final tubes:   {tubes_final}")
-    print(f"  Final particles: {particles_final} "
+    print(f"  Total iterations: {min(iteration, max_iterations)}")
+    print(f"  Tubes merged:     {tubes_merged}")
+    print(f"  Final tubes:      {tubes_final}")
+    print(f"  Final particles:  {particles_final} "
           f"({particles_final - particles_initial:+d})")
     print("="*60 + "\n")
     
-    return df_final
+    return df_current

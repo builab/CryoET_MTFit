@@ -4,3 +4,4 @@ plotly
 starfile
 scipy
 copick
+scikit-learn
