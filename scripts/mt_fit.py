@@ -728,8 +728,7 @@ Examples:
     add_common_arguments(pipeline_parser)
     add_fit_arguments(pipeline_parser)
     add_clean_arguments(pipeline_parser)
-    add_predict_arguments(pipeline_parser)
-    
+
     # Connection arguments for pipeline
     pipeline_parser.add_argument('--dist_extrapolate', type=float, required=True,
                                 help='Initial extrapolation distance in Angstroms (REQUIRED)')
