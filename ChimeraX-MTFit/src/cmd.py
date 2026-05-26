@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import shutil
 
 from chimerax.core.commands import (
     CmdDesc, register,
@@ -11,14 +12,20 @@ from chimerax.core.settings import Settings
 
 TEMPDIR = "/tmp"
 
+# Directory where this file (and bundled scripts/utils) lives
+_BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def _resolve_python(project_root: str) -> str:
-    """Return the best available Python: project .venv → system python3."""
-    venv_python = os.path.join(project_root, ".venv", "bin", "python3")
-    if os.path.exists(venv_python):
-        return venv_python
-    # Fall back to whatever python3 is on PATH
-    import shutil
+
+def _bundled_script() -> str:
+    return os.path.join(_BUNDLE_DIR, "scripts", "mt_fit.py")
+
+
+def _resolve_python(venv_root: str = None) -> str:
+    """Return best available Python: optional venv → system python3."""
+    if venv_root:
+        venv_python = os.path.join(os.path.expanduser(venv_root), ".venv", "bin", "python3")
+        if os.path.exists(venv_python):
+            return venv_python
     system_python = shutil.which("python3") or shutil.which("python")
     if system_python:
         return system_python
@@ -26,12 +33,12 @@ def _resolve_python(project_root: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Persistent settings — stored in ChimeraX preferences automatically
+# Persistent settings — optional venv override, stored in ChimeraX prefs
 # ---------------------------------------------------------------------------
 
 class _MTFitSettings(Settings):
     EXPLICIT_SAVE = {
-        "project_root": "",
+        "venv_root": "",
     }
 
 
@@ -45,36 +52,21 @@ def _get_settings(session):
     return _settings
 
 
-def _get_project_root(session):
-    root = _get_settings(session).project_root
-    if not root:
-        raise ValueError(
-            "MTFit project path is not set. Run this once to configure it:\n"
-            "  mtfit setpath /path/to/CryoET_MTFit"
-        )
-    return root
-
-
 # ---------------------------------------------------------------------------
-# mtfit setpath — configure project root (run once per machine)
+# mtfit setpath — optional: point to a repo with a .venv to use its Python
 # ---------------------------------------------------------------------------
 
 def mtfit_setpath(session, project_root):
-    """Store the CryoET_MTFit project directory in ChimeraX preferences."""
+    """Optionally set a CryoET_MTFit repo path so its .venv Python is used."""
     project_root = os.path.expanduser(project_root)
     if not os.path.isdir(project_root):
         session.logger.error(f"Directory not found: {project_root}")
         return
 
-    python = _resolve_python(project_root)
-    script = os.path.join(project_root, "scripts", "mt_fit.py")
-    if not os.path.exists(script):
-        session.logger.warning(f"mt_fit.py not found at expected path: {script}")
-
     s = _get_settings(session)
-    s.project_root = project_root
+    s.venv_root = project_root
     s.save()
-    session.logger.info(f"MTFit project path saved: {project_root}")
+    session.logger.info(f"MTFit venv root saved: {project_root} (optional override)")
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +86,13 @@ def mtfit(session,
           neighbor_rad=100.0):
     """Run the full MT fitting pipeline on a particle list model."""
 
-    try:
-        project_root = _get_project_root(session)
-    except ValueError as e:
-        session.logger.error(str(e))
-        return
+    venv_root = _get_settings(session).venv_root or None
+    python_exec = _resolve_python(venv_root)
+    mt_fit_script = _bundled_script()
 
-    python_exec = _resolve_python(project_root)
-    mt_fit_script = os.path.join(project_root, "scripts", "mt_fit.py")
+    if not os.path.exists(mt_fit_script):
+        session.logger.error(f"Bundled mt_fit.py not found: {mt_fit_script}")
+        return
 
     # --- 1. Save particle list to temp file ---
     input_star_file = model.name
@@ -131,8 +122,12 @@ def mtfit(session,
         "--template",          tmp_star,
     ]
 
-    session.logger.info(f"Running pipeline...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # utils/ sits alongside cmd.py in the bundle — add to PYTHONPATH
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _BUNDLE_DIR + os.pathsep + env.get("PYTHONPATH", "")
+
+    session.logger.info("Running pipeline...")
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
     if result.returncode != 0:
         session.logger.error(f"Pipeline failed:\n{result.stderr}")
@@ -183,8 +178,8 @@ def register_commands(logger):
         synopsis="Run full MT fitting pipeline on a particle list model",
     ), mtfit)
 
-    # mtfit setpath <project_root>
+    # mtfit setpath <project_root> — optional, only needed to use a custom venv
     register("mtfit setpath", CmdDesc(
         required=[("project_root", StringArg)],
-        synopsis="Set the CryoET_MTFit project directory (run once per machine)",
+        synopsis="Optional: set a repo path so its .venv Python is used",
     ), mtfit_setpath)

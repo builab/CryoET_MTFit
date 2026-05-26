@@ -15,7 +15,7 @@ setup(
     package_dir={"chimerax.mtfit": "src"},
     packages=["chimerax.mtfit"],
     include_package_data=True,
-    package_data={"chimerax.mtfit": ["bundle_info.xml"]},
+    package_data={"chimerax.mtfit": ["bundle_info.xml", "scripts/*.py", "utils/*.py"]},
     classifiers=[
         "Development Status :: 3 - Alpha",
         "ChimeraX :: Bundle :: General :: 1,1 :: chimerax.mtfit :: ChimeraX-MTFit :: Microtubule curve fitting for cryo-ET",
