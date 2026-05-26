@@ -2,16 +2,12 @@ from chimerax.core.toolshed import BundleAPI
 
 
 class _MTFitBundle(BundleAPI):
-    """
-    Entry point ChimeraX reads at startup.
-    Registers the 'mtfit' command and (later) the GUI tool panel.
-    """
     api_version = 1
 
     @staticmethod
     def register_command(bi, ci, logger):
         from . import cmd
-        if ci.name in ("mtfit", "mtfit setpath"):
+        if ci.name == "mtfit":
             cmd.register_commands(logger)
 
     @staticmethod
