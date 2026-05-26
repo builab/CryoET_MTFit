@@ -17,18 +17,15 @@ _BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _bundled_script() -> str:
-    return os.path.join(_BUNDLE_DIR, "scripts", "mt_fit.py")
+    return os.path.join(_BUNDLE_DIR, "mt_fit.py")
 
 
 def _resolve_python(venv_root: str = None) -> str:
-    """Return best available Python: optional venv → system python3."""
+    """Return best available Python: optional venv → ChimeraX's own Python."""
     if venv_root:
         venv_python = os.path.join(os.path.expanduser(venv_root), ".venv", "bin", "python3")
         if os.path.exists(venv_python):
             return venv_python
-    system_python = shutil.which("python3") or shutil.which("python")
-    if system_python:
-        return system_python
     return sys.executable
 
 
