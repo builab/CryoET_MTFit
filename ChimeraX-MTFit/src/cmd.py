@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 
 from chimerax.core.commands import (
     CmdDesc, register,
@@ -9,6 +10,19 @@ from chimerax.core.commands import (
 from chimerax.core.settings import Settings
 
 TEMPDIR = "/tmp"
+
+
+def _resolve_python(project_root: str) -> str:
+    """Return the best available Python: project .venv → system python3."""
+    venv_python = os.path.join(project_root, ".venv", "bin", "python3")
+    if os.path.exists(venv_python):
+        return venv_python
+    # Fall back to whatever python3 is on PATH
+    import shutil
+    system_python = shutil.which("python3") or shutil.which("python")
+    if system_python:
+        return system_python
+    return sys.executable
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +66,8 @@ def mtfit_setpath(session, project_root):
         session.logger.error(f"Directory not found: {project_root}")
         return
 
-    python = os.path.join(project_root, ".venv", "bin", "python3")
+    python = _resolve_python(project_root)
     script = os.path.join(project_root, "scripts", "mt_fit.py")
-    if not os.path.exists(python):
-        session.logger.warning(f"venv not found at expected path: {python}")
     if not os.path.exists(script):
         session.logger.warning(f"mt_fit.py not found at expected path: {script}")
 
@@ -88,7 +100,7 @@ def mtfit(session,
         session.logger.error(str(e))
         return
 
-    python_exec = os.path.join(project_root, ".venv", "bin", "python3")
+    python_exec = _resolve_python(project_root)
     mt_fit_script = os.path.join(project_root, "scripts", "mt_fit.py")
 
     # --- 1. Save particle list to temp file ---
