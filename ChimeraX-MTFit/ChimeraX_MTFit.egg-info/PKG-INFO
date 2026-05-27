@@ -1,0 +1,43 @@
+Metadata-Version: 2.4
+Name: ChimeraX-MTFit
+Version: 1.0.0
+Summary: Microtubule curve fitting for cryo-ET template matching data
+Home-page: https://github.com/builab/CryoET_MTCurveFit
+Author: Bui Lab @ McGill
+Author-email: huy.bui@mcgill.ca
+Classifier: Framework :: ChimeraX
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Development Status :: 3 - Alpha
+Classifier: License :: Freeware
+Classifier: Environment :: MacOS X :: Aqua
+Classifier: Environment :: Win32 (MS Windows)
+Classifier: Environment :: X11 Applications
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: Microsoft :: Windows :: Windows 10
+Classifier: Operating System :: POSIX :: Linux
+Classifier: ChimeraX :: Bundle :: General :: 1,1 :: chimerax.mtfit ::  :: 
+Classifier: ChimeraX :: Command :: mtfit :: General :: Fit microtubule curves on template matching particle list
+Classifier: ChimeraX :: Command :: mtfit setpath :: General :: Set the CryoET_MTFit project directory path
+Classifier: ChimeraX :: Tool :: MTFit :: General :: Microtubule curve fitting panel
+Requires-Python: >=3.7
+Requires-Dist: ChimeraX-Core~=1.1
+Requires-Dist: ChimeraX-UI~=1.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+Fits polynomial curves to microtubule positions from 3D template matching
+    STAR files. Runs a 4-step pipeline inside ChimeraX:
+      1. Fit    - seed-and-grow curve fitting
+      2. Clean  - remove duplicate/overlapping tubes
+      3. Connect - join broken tube segments by trajectory extrapolation
+      4. Predict - assign initial angles from template matching data
