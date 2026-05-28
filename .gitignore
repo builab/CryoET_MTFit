@@ -3,5 +3,4 @@
 *.pyc
 .venv/
 ChimeraX-MTFit/build/
-ChimeraX-MTFit/dist/
 ChimeraX-MTFit/*.egg-info/
