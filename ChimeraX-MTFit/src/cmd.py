@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import sysconfig
 
 from chimerax.core.commands import (
     CmdDesc, register,
@@ -16,6 +17,18 @@ _BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _bundled_script() -> str:
     return os.path.join(_BUNDLE_DIR, "mt_fit.py")
+
+
+def _chimerax_python() -> str:
+    """Return the actual Python interpreter — sys.executable in ChimeraX is the app launcher."""
+    bin_dir = sysconfig.get_config_var("BINDIR")
+    versioned = os.path.join(bin_dir, f"python{sys.version_info.major}.{sys.version_info.minor}")
+    if os.path.exists(versioned):
+        return versioned
+    plain = os.path.join(bin_dir, "python3")
+    if os.path.exists(plain):
+        return plain
+    return sys.executable
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +66,9 @@ def mtfit(session,
     from chimerax.core.commands import run
     run(session, f'save "{tmp_star}" partlist #{".".join(str(i) for i in model.id)}')
 
-    # --- 2. Run pipeline using ChimeraX's own Python (has all declared deps) ---
+    # --- 2. Run pipeline using ChimeraX's Python interpreter ---
     cmd = [
-        sys.executable, mt_fit_script, "pipeline", tmp_star,
+        _chimerax_python(), mt_fit_script, "pipeline", tmp_star,
         "--angpix",            str(voxel_size),
         "--sample_step",       str(sample_step),
         "--min_seed",          str(min_seed),
