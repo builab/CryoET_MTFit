@@ -46,6 +46,24 @@ class MTFitTool(ToolInstance):
         model_row.addWidget(refresh_btn)
         main_layout.addLayout(model_row)
 
+        # ---- Step selector ----
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Run:"))
+        self._step_combo = QComboBox()
+        self._step_combo.addItem("Full pipeline (Fit → Clean → Connect → Predict)", userData="pipeline")
+        self._step_combo.addItem("1. Fit only", userData="fit")
+        self._step_combo.addItem("2. Clean only", userData="clean")
+        self._step_combo.addItem("3. Connect only", userData="connect")
+        self._step_combo.addItem("4. Predict only", userData="predict")
+        self._step_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._step_combo.setToolTip(
+            "Run the full pipeline, or just one step on the selected particle list.\n"
+            "Running a single step expects the input to already be at the right stage\n"
+            "(e.g. run 'Connect' on the output of 'Clean')."
+        )
+        step_row.addWidget(self._step_combo)
+        main_layout.addLayout(step_row)
+
         # ---- Tabs ----
         tabs = QTabWidget()
 
@@ -93,10 +111,12 @@ class MTFitTool(ToolInstance):
         main_layout.addWidget(tabs)
 
         # ---- Run button ----
-        self._run_btn = QPushButton("Run MTFit")
+        self._run_btn = QPushButton("Run")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.clicked.connect(self._run)
         main_layout.addWidget(self._run_btn)
+        self._step_combo.currentIndexChanged.connect(self._update_run_button_label)
+        self._update_run_button_label()
 
         # ---- Status label ----
         self._status = QLabel("")
@@ -126,6 +146,12 @@ class MTFitTool(ToolInstance):
         w.setValue(default)
         return w
 
+    def _update_run_button_label(self):
+        idx = self._step_combo.currentIndex()
+        step = self._step_combo.itemData(idx)
+        label = "Run Full Pipeline" if step == "pipeline" else f"Run Step: {self._step_combo.currentText()}"
+        self._run_btn.setText(label)
+
     def _refresh_models(self):
         self._model_combo.clear()
         for m in self.session.models:
@@ -148,11 +174,14 @@ class MTFitTool(ToolInstance):
             self.session.logger.error("No particle list selected.")
             return
 
+        step = self._step_combo.itemData(self._step_combo.currentIndex())
+
         self._status.setText("Running…")
         self._run_btn.setEnabled(False)
 
         cmd = (
             f"mtfit {model_id}"
+            f" step {step}"
             f" voxel_size {self._voxel_size.value()}"
             f" sample_step {self._sample_step.value()}"
             f" min_seed {self._min_seed.value()}"

@@ -138,7 +138,13 @@ def read_star(file_path: str) -> pd.DataFrame:
     if 'rlnDetectorPixelSize' in df.columns and 'rlnImagePixelSize' not in df.columns:
         df = df.rename(columns={'rlnDetectorPixelSize': 'rlnImagePixelSize'})
         print('Rename rlnDetectorPixelSize to rlnImagePixelSize')
-        
+
+    # STAR files round-trip rlnHelicalTubeID as float (e.g. "1.000000"); normalize
+    # back to int so downstream code (e.g. connect's "{:4d}" formatting) works the
+    # same whether the DataFrame came fresh from fitting or was reloaded from disk.
+    if 'rlnHelicalTubeID' in df.columns:
+        df['rlnHelicalTubeID'] = df['rlnHelicalTubeID'].astype(int)
+
     print(f'Read {file_path} and sanitize')
 
     return df
