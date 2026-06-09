@@ -6,12 +6,13 @@ def _ensure_dependencies():
     import importlib.util, subprocess, sys, sysconfig, os
 
     needed = {
-        "pandas":   "pandas>=1.5,<3",
-        "starfile":  "starfile>=0.5",
-        "copick":    "copick>=1.0",
-        "sklearn":   "scikit-learn>=1.0",
-        "plotly":    "plotly>=5.0",
-        "scipy":     "scipy>=1.7",
+        "pandas":      "pandas>=1.5,<3",
+        "starfile":    "starfile>=0.5",
+        "copick":      "copick>=1.0",
+        "sklearn":     "scikit-learn>=1.0",
+        "plotly":      "plotly>=5.0",
+        "scipy":       "scipy>=1.7",
+        "matplotlib":  "matplotlib>=3.5",
     }
 
     missing = [pip_spec for import_name, pip_spec in needed.items()

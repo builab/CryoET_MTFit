@@ -35,6 +35,7 @@
     <Dependency name="copick"        version=">=1.0"/>
     <Dependency name="scikit-learn"  version=">=1.0"/>
     <Dependency name="plotly"        version=">=5.0"/>
+    <Dependency name="matplotlib"    version=">=3.5"/>
   </Dependencies>
 
   <!--
