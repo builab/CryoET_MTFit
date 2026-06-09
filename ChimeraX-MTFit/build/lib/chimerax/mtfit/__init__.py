@@ -3,7 +3,7 @@ from chimerax.core.toolshed import BundleAPI
 
 def _ensure_dependencies():
     """Install any missing PyPI dependencies into ChimeraX's Python (runs once)."""
-    import importlib.util, subprocess, sys, sysconfig, os
+    import subprocess, sys, sysconfig, os
 
     needed = {
         "pandas":      "pandas>=1.5,<3",
@@ -15,11 +15,6 @@ def _ensure_dependencies():
         "matplotlib":  "matplotlib>=3.5",
     }
 
-    missing = [pip_spec for import_name, pip_spec in needed.items()
-               if importlib.util.find_spec(import_name) is None]
-    if not missing:
-        return
-
     # Find ChimeraX's actual Python interpreter (sys.executable is the app launcher).
     # sysconfig BINDIR is baked at build time and may not exist on Linux system installs
     # (e.g. /home/runner/work/... CI path) — fall back to launcher's own directory.
@@ -29,6 +24,21 @@ def _ensure_dependencies():
     python = os.path.join(bin_dir, f"python{sys.version_info.major}.{sys.version_info.minor}")
     if not os.path.exists(python):
         python = os.path.join(bin_dir, "python3")
+
+    # Check importability using the subprocess Python — not find_spec(), which checks
+    # the current ChimeraX process and can be fooled by an active conda environment
+    # that the subprocess Python cannot access.
+    missing = []
+    for import_name, pip_spec in needed.items():
+        result = subprocess.run(
+            [python, "-c", f"import {import_name}"],
+            capture_output=True
+        )
+        if result.returncode != 0:
+            missing.append(pip_spec)
+
+    if not missing:
+        return
 
     print(f"MTFit: installing missing packages: {missing}")
     subprocess.check_call([python, "-m", "pip", "install"] + missing)
