@@ -19,8 +19,12 @@ def _ensure_dependencies():
     if not missing:
         return
 
-    # Find ChimeraX's actual Python interpreter (sys.executable is the app launcher)
+    # Find ChimeraX's actual Python interpreter (sys.executable is the app launcher).
+    # sysconfig BINDIR is baked at build time and may not exist on Linux system installs
+    # (e.g. /home/runner/work/... CI path) — fall back to launcher's own directory.
     bin_dir = sysconfig.get_config_var("BINDIR")
+    if not os.path.isdir(bin_dir):
+        bin_dir = os.path.dirname(os.path.abspath(sys.executable))
     python = os.path.join(bin_dir, f"python{sys.version_info.major}.{sys.version_info.minor}")
     if not os.path.exists(python):
         python = os.path.join(bin_dir, "python3")

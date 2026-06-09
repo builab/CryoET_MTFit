@@ -31,8 +31,12 @@ def _bundled_script() -> str:
 
 
 def _chimerax_python() -> str:
-    """Return the actual Python interpreter — sys.executable in ChimeraX is the app launcher."""
+    """Return the actual Python interpreter — sys.executable in ChimeraX is the app launcher.
+    sysconfig BINDIR is baked at build time and may not exist on Linux system installs
+    (e.g. /home/runner/work/... CI path) — fall back to launcher's own directory."""
     bin_dir = sysconfig.get_config_var("BINDIR")
+    if not os.path.isdir(bin_dir):
+        bin_dir = os.path.dirname(os.path.abspath(sys.executable))
     versioned = os.path.join(bin_dir, f"python{sys.version_info.major}.{sys.version_info.minor}")
     if os.path.exists(versioned):
         return versioned
