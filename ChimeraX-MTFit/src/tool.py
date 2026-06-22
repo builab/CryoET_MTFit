@@ -120,13 +120,21 @@ class MTFitTool(ToolInstance):
 
         main_layout.addWidget(tabs)
 
-        # ---- Run button ----
+        # ---- Run / Batch buttons ----
+        run_row = QHBoxLayout()
         self._run_btn = QPushButton("Run")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.clicked.connect(self._run)
-        main_layout.addWidget(self._run_btn)
         self._step_combo.currentIndexChanged.connect(self._update_run_button_label)
         self._update_run_button_label()
+        run_row.addWidget(self._run_btn)
+
+        batch_btn = QPushButton("Batch…")
+        batch_btn.setMinimumHeight(32)
+        batch_btn.setToolTip("Open batch processing window to run on multiple files")
+        batch_btn.clicked.connect(self._open_batch)
+        run_row.addWidget(batch_btn)
+        main_layout.addLayout(run_row)
 
         # ---- Status label ----
         self._status = QLabel("")
@@ -214,3 +222,20 @@ class MTFitTool(ToolInstance):
             self.session.logger.error(str(e))
         finally:
             self._run_btn.setEnabled(True)
+
+    def _open_batch(self):
+        from . import batch
+        batch.MTFitBatchDialog(
+            self.session,
+            default_params=dict(
+                voxel_size        = self._voxel_size.value(),
+                sample_step       = self._sample_step.value(),
+                min_seed          = self._min_seed.value(),
+                poly              = self._poly.value(),
+                clean_dist_thres  = self._clean_dist_thres.value(),
+                dist_extrapolate  = self._dist_extrapolate.value(),
+                overlap_thres     = self._overlap_thres.value(),
+                min_part_per_tube = self._min_part_per_tube.value(),
+                neighbor_rad      = self._neighbor_rad.value(),
+            ),
+        )
