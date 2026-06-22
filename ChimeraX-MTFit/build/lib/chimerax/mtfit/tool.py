@@ -225,7 +225,7 @@ class MTFitTool(ToolInstance):
 
     def _open_batch(self):
         from . import batch
-        batch.MTFitBatchDialog(
+        self._batch_dialog = batch.MTFitBatchDialog(
             self.session,
             default_params=dict(
                 voxel_size        = self._voxel_size.value(),
