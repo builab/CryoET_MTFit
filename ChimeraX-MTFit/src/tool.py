@@ -1,5 +1,6 @@
 from chimerax.core.tools import ToolInstance
 from chimerax.core.commands import run
+from chimerax.core.models import ADD_MODELS, REMOVE_MODELS
 
 
 class MTFitTool(ToolInstance):
@@ -15,6 +16,15 @@ class MTFitTool(ToolInstance):
         self.tool_window = MainToolWindow(self)
         self._build_ui()
         self.tool_window.manage(placement=None)  # floating window
+
+        # Auto-refresh the model dropdown whenever models are added or removed
+        self._add_handler    = session.triggers.add_handler(ADD_MODELS,    self._on_models_changed)
+        self._remove_handler = session.triggers.add_handler(REMOVE_MODELS, self._on_models_changed)
+
+    def delete(self):
+        self.session.triggers.remove_handler(self._add_handler)
+        self.session.triggers.remove_handler(self._remove_handler)
+        super().delete()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -151,6 +161,9 @@ class MTFitTool(ToolInstance):
         step = self._step_combo.itemData(idx)
         label = "Run Full Pipeline" if step == "pipeline" else f"Run Step: {self._step_combo.currentText()}"
         self._run_btn.setText(label)
+
+    def _on_models_changed(self, trigger_name, changes):
+        self._refresh_models()
 
     def _refresh_models(self):
         self._model_combo.clear()
