@@ -199,10 +199,21 @@ class MTFitTool(ToolInstance):
         batch_form = QFormLayout(batch_group)
         batch_form.setContentsMargins(8, 8, 8, 8)
 
+        # Output folder
+        out_row = QHBoxLayout()
+        self._output_folder_edit = QLineEdit()
+        self._output_folder_edit.setPlaceholderText("Where to save processed files")
+        browse_out_btn = QPushButton("Browse…")
+        browse_out_btn.setFixedWidth(65)
+        browse_out_btn.clicked.connect(self._browse_output_folder)
+        out_row.addWidget(self._output_folder_edit)
+        out_row.addWidget(browse_out_btn)
+        batch_form.addRow("Output folder:", out_row)
+
+        # Batch input folder
         folder_row = QHBoxLayout()
         self._batch_folder_edit = QLineEdit()
-        self._batch_folder_edit.setPlaceholderText("Leave empty for single-file mode")
-        self._batch_folder_edit.textChanged.connect(self._update_run_button_label)
+        self._batch_folder_edit.setPlaceholderText("Folder of .star files for batch run")
         browse_folder_btn = QPushButton("Browse…")
         browse_folder_btn.setFixedWidth(65)
         browse_folder_btn.clicked.connect(self._browse_batch_folder)
@@ -226,13 +237,19 @@ class MTFitTool(ToolInstance):
 
         main_layout.addWidget(batch_group)
 
-        # ---- Run button ----
+        # ---- Two run buttons ----
+        run_row = QHBoxLayout()
         self._run_btn = QPushButton("Run")
         self._run_btn.setMinimumHeight(32)
-        self._run_btn.clicked.connect(self._run)
-        self._step_combo.currentIndexChanged.connect(self._update_run_button_label)
-        self._update_run_button_label()
-        main_layout.addWidget(self._run_btn)
+        self._run_btn.setToolTip("Run on the selected particle list model")
+        self._run_btn.clicked.connect(self._run_single)
+        self._run_batch_btn = QPushButton("Run Batch")
+        self._run_batch_btn.setMinimumHeight(32)
+        self._run_batch_btn.setToolTip("Run on all .star files in the Batch folder")
+        self._run_batch_btn.clicked.connect(self._run_batch_clicked)
+        run_row.addWidget(self._run_btn)
+        run_row.addWidget(self._run_batch_btn)
+        main_layout.addLayout(run_row)
 
         # ---- Status label ----
         self._status = QLabel("")
@@ -240,19 +257,24 @@ class MTFitTool(ToolInstance):
         main_layout.addWidget(self._status)
 
         # ---- Results table ----
-        self._results_group = QGroupBox("Results")
+        self._results_group = QGroupBox(
+            "Results  (⚠ Problematic = 0 tubes found OR <30% particles retained)"
+        )
         results_layout = QVBoxLayout(self._results_group)
 
         csv_row = QHBoxLayout()
+        self._auto_csv_lbl = QLabel("")
+        csv_row.addWidget(self._auto_csv_lbl)
+        csv_row.addStretch()
         save_csv_btn = QPushButton("Save CSV…")
+        save_csv_btn.setToolTip("Save an additional copy of the results table")
         save_csv_btn.clicked.connect(self._save_csv)
         csv_row.addWidget(save_csv_btn)
-        csv_row.addStretch()
         results_layout.addLayout(csv_row)
 
         self._table = QTableWidget(0, 8)
         self._table.setHorizontalHeaderLabels(
-            ["File", "Status", "In ✦", "Out ✦", "Tubes", "Pts/Tube", "Mean Psi°", "Action"]
+            ["File", "Status", "In ✦", "Out ✦", "Tubes", "Pts/Tube", "Mean Psi°", "Open / Save"]
         )
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -294,15 +316,11 @@ class MTFitTool(ToolInstance):
         w.setValue(default)
         return w
 
-    def _update_run_button_label(self):
-        step = self._step_combo.itemData(self._step_combo.currentIndex())
-        batch = bool(self._batch_folder_edit.text().strip())
-        if batch:
-            self._run_btn.setText("Run Batch")
-        elif step == "pipeline":
-            self._run_btn.setText("Run Full Pipeline")
-        else:
-            self._run_btn.setText(f"Run Step: {self._step_combo.currentText()}")
+    def _browse_output_folder(self):
+        from Qt.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(None, "Select output folder")
+        if folder:
+            self._output_folder_edit.setText(folder)
 
     def _on_models_changed(self, trigger_name, changes):
         self._refresh_models()
@@ -323,7 +341,7 @@ class MTFitTool(ToolInstance):
     def _browse_batch_folder(self):
         from Qt.QtWidgets import QFileDialog
         folder = QFileDialog.getExistingDirectory(
-            None, "Select folder containing .star files"
+            None, "Select folder containing .star files for batch"
         )
         if folder:
             self._batch_folder_edit.setText(folder)
@@ -401,48 +419,52 @@ class MTFitTool(ToolInstance):
     # Run
     # ------------------------------------------------------------------
 
-    def _run(self):
+    def _run_batch_clicked(self):
         if self._running:
             return
-
+        folder = self._batch_folder_edit.text().strip()
+        if not folder:
+            self.session.logger.error("MTFit: set a Batch folder first.")
+            return
         self._auto_save_json()
-
-        batch_folder = self._batch_folder_edit.text().strip()
-        if batch_folder:
-            self._start_batch(batch_folder)
-        else:
-            self._run_single()
+        self._start_batch(folder)
 
     def _run_single(self):
+        if self._running:
+            return
         idx = self._model_combo.currentIndex()
         model_id = self._model_combo.itemData(idx)
         if not model_id:
             self.session.logger.error("No particle list selected.")
             return
 
+        self._auto_save_json()
         self._status.setText("Running…")
         self._run_btn.setEnabled(False)
+        self._run_batch_btn.setEnabled(False)
 
         params = self._get_params()
         step   = params["step"]
 
-        # Save model star to /tmp
-        import tempfile
         model = next((m for m in self.session.models
                       if '#' + '.'.join(str(i) for i in m.id) == model_id), None)
         if model is None:
             self._status.setText("Model not found.")
             self._run_btn.setEnabled(True)
+            self._run_batch_btn.setEnabled(True)
             return
 
+        import tempfile
         tmp_dir = tempfile.gettempdir()
         os.makedirs(tmp_dir, exist_ok=True)
         tmp_star = os.path.join(tmp_dir, os.path.basename(model.name))
         run(self.session, f'save "{tmp_star}" partlist {model_id}')
 
-        suffix = _OUTPUT_SUFFIX[step]
-        base   = os.path.splitext(os.path.basename(tmp_star))[0]
-        output_path = os.path.join(tmp_dir, f"{base}{suffix}.star")
+        suffix   = _OUTPUT_SUFFIX[step]
+        base     = os.path.splitext(os.path.basename(tmp_star))[0]
+        out_dir  = self._output_folder_edit.text().strip() or tmp_dir
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = os.path.join(out_dir, f"{base}{suffix}.star")
 
         returncode, stderr = _run_one(tmp_star, params, output_path)
 
@@ -478,6 +500,7 @@ class MTFitTool(ToolInstance):
             pass
 
         self._run_btn.setEnabled(True)
+        self._run_batch_btn.setEnabled(True)
         self._show_results()
         self._results = [result]
         self._table.setRowCount(0)
@@ -498,6 +521,7 @@ class MTFitTool(ToolInstance):
 
         self._running = True
         self._run_btn.setEnabled(False)
+        self._run_batch_btn.setEnabled(False)
         self._results = []
         self._table.setRowCount(0)
         self._show_results()
@@ -514,19 +538,21 @@ class MTFitTool(ToolInstance):
         self._status.setText(f"0 / {len(star_files)}")
         self._poll_timer.start(200)
 
-        params = self._get_params()
+        params   = self._get_params()
+        out_dir  = self._output_folder_edit.text().strip() or folder
+        os.makedirs(out_dir, exist_ok=True)
         threading.Thread(
             target=self._batch_worker,
-            args=(star_files, params),
+            args=(star_files, params, out_dir),
             daemon=True,
         ).start()
 
-    def _batch_worker(self, files, params):
+    def _batch_worker(self, files, params, out_dir):
         for i, filepath in enumerate(files):
             step   = params["step"]
             suffix = _OUTPUT_SUFFIX[step]
             base   = os.path.splitext(os.path.basename(filepath))[0]
-            output_path = os.path.join(os.path.dirname(filepath), f"{base}{suffix}.star")
+            output_path = os.path.join(out_dir, f"{base}{suffix}.star")
 
             try:
                 import starfile
@@ -577,10 +603,12 @@ class MTFitTool(ToolInstance):
                 self._poll_timer.stop()
                 self._running = False
                 self._run_btn.setEnabled(True)
+                self._run_batch_btn.setEnabled(True)
                 good = sum(1 for r in self._results if r.get("status") == "good")
                 prob = sum(1 for r in self._results
                            if r.get("status") in ("problematic", "failed"))
                 self._status.setText(f"Done — {good} good, {prob} problematic")
+                self._auto_save_csv()
                 break
 
             i = result["index"]
@@ -631,20 +659,78 @@ class MTFitTool(ToolInstance):
                 item.setBackground(color)
 
         if status in ("good", "problematic") and result.get("output_path"):
-            btn = QPushButton("Open")
-            btn.setFixedWidth(55)
+            from Qt.QtWidgets import QWidget, QHBoxLayout
             path = result["output_path"]
-            btn.clicked.connect(lambda _checked, p=path: run(self.session, f'open "{p}" format star'))
-            self._table.setCellWidget(i, 7, btn)
+            cell = QWidget()
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(2, 2, 2, 2)
+            cell_layout.setSpacing(3)
+
+            open_btn = QPushButton("Open")
+            open_btn.setFixedWidth(48)
+            open_btn.clicked.connect(
+                lambda _c, p=path: run(self.session, f'open "{p}" format star'))
+
+            save_btn = QPushButton("Save")
+            save_btn.setFixedWidth(44)
+            save_btn.setToolTip(
+                "Save the currently-open ChimeraX model back to this file "
+                "(use after manual edits). If no model is open, copies the "
+                "output file to the Output folder.")
+            save_btn.clicked.connect(lambda _c, p=path: self._save_row(p))
+
+            cell_layout.addWidget(open_btn)
+            cell_layout.addWidget(save_btn)
+            self._table.setCellWidget(i, 7, cell)
+
+    def _save_row(self, output_path):
+        """Save the matching open ChimeraX model back to disk (after manual edits)."""
+        basename = os.path.basename(output_path)
+        # Find a loaded model whose name matches
+        model = next((m for m in self.session.models
+                      if hasattr(m, 'name') and m.name == basename), None)
+        if model is None:
+            # Fall back: copy output file to output folder if set
+            out_dir = self._output_folder_edit.text().strip()
+            if out_dir and os.path.exists(output_path):
+                import shutil
+                dest = os.path.join(out_dir, basename)
+                shutil.copy2(output_path, dest)
+                self.session.logger.info(f"MTFit: copied to {dest}")
+            else:
+                self.session.logger.warning(
+                    "MTFit: open the file in ChimeraX first to save edits.")
+            return
+        model_id = '#' + '.'.join(str(i) for i in model.id)
+        out_dir  = self._output_folder_edit.text().strip()
+        save_path = os.path.join(out_dir, basename) if out_dir else output_path
+        run(self.session, f'save "{save_path}" partlist {model_id}')
+        self.session.logger.info(f"MTFit: saved to {save_path}")
+
+    def _auto_save_csv(self):
+        """Auto-save CSV to output folder after batch completes."""
+        out_dir = self._output_folder_edit.text().strip()
+        if not out_dir:
+            return
+        path = os.path.join(out_dir, "mtfit_results.csv")
+        self._write_csv(path)
+        self._auto_csv_lbl.setText(f"Auto-saved: {os.path.basename(path)}")
+        self.session.logger.info(f"MTFit: results auto-saved to {path}")
 
     def _save_csv(self):
         from Qt.QtWidgets import QFileDialog
-        import csv
-        path, _ = QFileDialog.getSaveFileName(
-            None, "Save results as CSV", "mtfit_results.csv", "CSV files (*.csv)"
+        default = os.path.join(
+            self._output_folder_edit.text().strip() or os.path.expanduser("~"),
+            "mtfit_results.csv"
         )
-        if not path:
-            return
+        path, _ = QFileDialog.getSaveFileName(
+            None, "Save results as CSV", default, "CSV files (*.csv)"
+        )
+        if path:
+            self._write_csv(path)
+
+    def _write_csv(self, path):
+        import csv
         headers = ["File", "Status", "Input particles", "Output particles",
                    "Tubes", "Particles/tube", "Mean Psi (deg)", "Note", "Output path"]
         try:
