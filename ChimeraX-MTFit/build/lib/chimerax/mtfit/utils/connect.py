@@ -12,6 +12,7 @@ This module provides functionality to:
 
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 from typing import Dict, Any, Tuple, Optional, List
 
 # Constants
@@ -276,6 +277,54 @@ def assess_connection_compatibility(
     return True, min_distance, reverse1, reverse2, end_to_end_distance
 
 
+def is_endpoint_to_endpoint_junction(
+    coords1: np.ndarray,
+    coords2: np.ndarray,
+    overlap_threshold: float,
+    end_fraction: float = 0.15
+) -> Tuple[bool, float]:
+    """
+    Direction-agnostic fallback for tubes that are already touching but whose
+    forward polynomial extrapolation misses each other (e.g. the filament kinks
+    or bends right at the break, so a straight-line projection from one tip
+    heads the wrong way). Finds the single closest approach point between the
+    two full point clouds, and accepts it only if that point sits near a tip of
+    BOTH tubes — not spread along their middle, which would instead mean they
+    are just running close and parallel (e.g. adjacent doublet rows) and are
+    genuinely separate filaments that should stay unconnected.
+
+    Returns (is_junction, min_distance).
+    """
+    if len(coords1) < 2 or len(coords2) < 2:
+        return False, float('inf')
+
+    tree2 = cKDTree(coords2)
+    dist1, idx2 = tree2.query(coords1)
+    i1 = int(np.argmin(dist1))
+    min_distance = float(dist1[i1])
+
+    if min_distance > overlap_threshold:
+        return False, min_distance
+
+    i2 = int(idx2[i1])
+
+    def near_tip(coords: np.ndarray, index: int) -> bool:
+        centered = coords - coords.mean(axis=0)
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        proj = centered @ Vt[0]
+        lo, hi = proj.min(), proj.max()
+        span = hi - lo
+        if span <= 0:
+            return True
+        normalized = (proj[index] - lo) / span
+        return normalized < end_fraction or normalized > 1 - end_fraction
+
+    if near_tip(coords1, i1) and near_tip(coords2, i2):
+        return True, min_distance
+
+    return False, min_distance
+
+
 def find_tube_connections(
     df: pd.DataFrame,
     angpix: float,
@@ -347,7 +396,26 @@ def find_tube_connections(
                         'n_points1': tubes[tube_id1].n_points,
                         'n_points2': tubes[tube_id2].n_points
                     }
-            
+
+            # Fallback: forward extrapolation from either tip can miss a pair that's
+            # already touching if the filament kinks right at the break.
+            is_junction, raw_dist = is_endpoint_to_endpoint_junction(
+                tubes[tube_id1].coords, tubes[tube_id2].coords, overlap_threshold
+            )
+            if is_junction and raw_dist < best_score:
+                best_score = raw_dist
+                best_connection = {
+                    'tube_id1': tube_id1,
+                    'tube_id2': tube_id2,
+                    'min_overlap_dist': raw_dist,
+                    'simple_end_distance': raw_dist,
+                    'reverse1': False,
+                    'reverse2': False,
+                    'connection_type': 'Endpoint proximity (bypasses extrapolation)',
+                    'n_points1': tubes[tube_id1].n_points,
+                    'n_points2': tubes[tube_id2].n_points
+                }
+
             if best_connection is not None:
                 connections.append(best_connection)
     

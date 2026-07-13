@@ -514,6 +514,56 @@ def smooth_angles(df):
     return df_corrected
 
 
+def assign_twist_angles(
+    df: pd.DataFrame,
+    twist_angle: float,
+) -> pd.DataFrame:
+    """
+    Add a fixed angular increment per particle along each tube to the existing rlnAnglePsi.
+
+    Particles within each tube are ordered by projection onto the tube's principal axis
+    (first PCA component). Particle i gets rlnAnglePsi += i * twist_angle degrees, on top
+    of whatever psi was already assigned (e.g. by the predict step). If rlnAnglePsi is not
+    present, it is initialized to 0 before the twist increment is applied.
+    Only rlnAnglePsi is modified; other columns are left unchanged.
+    """
+    if 'rlnHelicalTubeID' not in df.columns:
+        raise ValueError("rlnHelicalTubeID column required for twist assignment")
+
+    df_out = df.copy()
+    if 'rlnAnglePsi' not in df_out.columns:
+        df_out['rlnAnglePsi'] = 0.0
+
+    print(f"\n{'='*60}")
+    print("TWIST ANGLE ASSIGNMENT")
+    print(f"{'='*60}")
+    print(f"  Twist angle per particle: {twist_angle}°")
+
+    tube_ids = df_out['rlnHelicalTubeID'].unique()
+    for tube_id in tube_ids:
+        mask = df_out['rlnHelicalTubeID'] == tube_id
+        group = df_out[mask]
+        coords = group[COORD_COLUMNS].to_numpy(dtype=float)
+
+        if len(coords) > 1:
+            centered = coords - coords.mean(axis=0)
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            projections = centered @ Vt[0]
+            order = np.argsort(projections)
+        else:
+            order = np.array([0])
+
+        indices = group.index[order]
+        increment = np.arange(len(indices)) * twist_angle
+        df_out.loc[indices, 'rlnAnglePsi'] = normalize_angle(
+            df_out.loc[indices, 'rlnAnglePsi'].to_numpy(dtype=float) + increment
+        )
+
+    print(f"  ✓ Assigned twist angles to {len(tube_ids)} tubes, "
+          f"{len(df_out)} particles total")
+    return df_out
+
+
 def predict_angles(
     df_input: pd.DataFrame,
     df_template: Optional[pd.DataFrame] = None,

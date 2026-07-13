@@ -6,7 +6,7 @@ I/O utilities for STAR file processing.
 @Builab 2025
 """
 
-import os,sys
+import os
 import glob
 import re
 from typing import Tuple, Optional
@@ -16,12 +16,33 @@ import starfile
 from pathlib import Path
 
 _RE = re.compile(r'^(.*_\d+)_\d+(?:\.\d+)?Apx$', re.IGNORECASE)
+_SUFFIX_RE = re.compile(
+    r'_(?:particles|fitted|cleaned|connected|predicted|processed|twisted|sorted)$',
+    re.IGNORECASE
+)
 
 def sanitize_name(name: str) -> str:
     """Return sanitized name or original name if it doesn't match the pattern."""
     m = _RE.match(name)
     if m:
         return f"{m.group(1)}"
+    return name
+
+def stem_to_tomo_name(stem: str) -> str:
+    """
+    Derive a clean TomoName from a filename stem.
+    Strips pixel-size suffixes (_14.00Apx) then known pipeline/input suffixes
+    (_particles, _fitted, _cleaned, _connected, _predicted, _processed, _twisted, _sorted)
+    repeatedly until none remain.
+    e.g. CCDC147C_001_particles_processed -> CCDC147C_001
+         Position_2_14.00Apx_particles   -> Position_2
+    """
+    name = sanitize_name(stem) or stem
+    while True:
+        stripped = _SUFFIX_RE.sub('', name)
+        if stripped == name:
+            break
+        name = stripped
     return name
 
 def validate_dataframe(df: pd.DataFrame, required_columns: list = None) -> None:
@@ -123,10 +144,14 @@ def read_star(file_path: str) -> pd.DataFrame:
         df = df.rename(columns={'rlnMicrographName': 'rlnTomoName'})
         print('Rename rlnMicrographName to rlnTomoName')
 
-    # **HIGHLIGHTED CHANGE: Add default rlnTomoName if missing**
+    # Derive TomoName from the input filename when the column is absent.
+    # sanitize_name strips pixel-size suffixes (e.g. _14.00Apx) so
+    # "Position_2_14.00Apx.star" becomes "Position_2".
     if 'rlnTomoName' not in df.columns:
-        df['rlnTomoName'] = 'TS_001'
-        print('rlnTomoName column not found - added with default value: TS_001')
+        stem = os.path.splitext(os.path.basename(file_path))[0]
+        tomo_default = stem_to_tomo_name(stem) or stem
+        df['rlnTomoName'] = tomo_default
+        print(f'rlnTomoName column not found - set to: {tomo_default}')
         
     # --- Step 2: Remove trailing .tomostar first ---    
     if 'rlnTomoName' in df.columns:
@@ -160,6 +185,22 @@ def write_star(df: pd.DataFrame, file_path: str, overwrite: bool = True) -> None
         overwrite: Whether to overwrite existing file.
     """
     starfile.write(df, file_path, overwrite=overwrite)
+
+
+def renumber_tubes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reassign rlnHelicalTubeID to consecutive integers starting at 1.
+
+    After cleaning or connecting, gaps appear in tube IDs (e.g. 1,4,6).
+    This maps them to 1,2,3,... in the order they first appear in the DataFrame.
+    """
+    if 'rlnHelicalTubeID' not in df.columns:
+        return df
+    unique_ids = list(dict.fromkeys(df['rlnHelicalTubeID']))  # preserves order
+    id_map = {old: new for new, old in enumerate(unique_ids, start=1)}
+    df = df.copy()
+    df['rlnHelicalTubeID'] = df['rlnHelicalTubeID'].map(id_map)
+    return df
 
 
 def write_copick(
@@ -327,8 +368,7 @@ def combine_star_files(input_patterns: list, output_file: str) -> None:
     input_files = sorted(set(input_files))
     
     if not input_files:
-        print(f"Error: No input files found")
-        sys.exit(1)
+        raise RuntimeError("No input files found")
     
     print(f"Found {len(input_files)} files to process")
     
@@ -364,8 +404,7 @@ def combine_star_files(input_patterns: list, output_file: str) -> None:
             continue
     
     if not all_dfs:
-        print("Error: No valid STAR files were processed")
-        sys.exit(1)
+        raise RuntimeError("No valid STAR files were processed")
     
     # Combine all DataFrames
     combined_df = pd.concat(all_dfs, ignore_index=True)

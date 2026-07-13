@@ -154,6 +154,50 @@ def compute_proximity_score(
     return np.mean(distances)
 
 
+def compute_endpoint_continuation_fraction(
+    coords_shorter: np.ndarray,
+    coords_longer: np.ndarray,
+    end_fraction: float = 0.15
+) -> float:
+    """
+    Estimate whether the shorter tube looks like a broken-off continuation of the
+    longer tube's end, rather than a duplicate detection lying along its length.
+
+    Projects the longer tube's points onto its own principal axis, finds where each
+    shorter-tube point's nearest longer-tube neighbor falls along that axis, and
+    returns the fraction of those matches that land within `end_fraction` of either
+    tip. A high fraction means the shorter tube only ever touches the longer tube's
+    endpoint — i.e. it's likely the next real segment along the same filament, which
+    Connect should bridge, not something Clean should delete as a duplicate. A low
+    fraction means matches are spread along the longer tube's middle, consistent
+    with a true overlapping/duplicate detection.
+
+    Args:
+        coords_shorter: Shorter tube coordinates (N x 3) in Angstroms.
+        coords_longer: Longer tube coordinates (M x 3) in Angstroms.
+        end_fraction: Fraction of the longer tube's length, from each tip, counted
+                      as "the end" (default 0.15 = outer 15% on each side).
+
+    Returns:
+        Fraction (0-1) of shorter-tube points whose nearest longer-tube match falls
+        within `end_fraction` of either tip.
+    """
+    centered = coords_longer - coords_longer.mean(axis=0)
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+    proj_longer = centered @ Vt[0]
+    lo, hi = proj_longer.min(), proj_longer.max()
+    span = hi - lo
+    if span <= 0:
+        return 0.0
+
+    tree = cKDTree(coords_longer)
+    _, nearest_idx = tree.query(coords_shorter)
+    normalized = (proj_longer[nearest_idx] - lo) / span
+
+    near_end = (normalized < end_fraction) | (normalized > 1 - end_fraction)
+    return float(np.mean(near_end))
+
+
 def analyze_tube_overlaps(
     df: pd.DataFrame,
     margin: float,
@@ -161,16 +205,16 @@ def analyze_tube_overlaps(
 ) -> pd.DataFrame:
     """
     Analyze overlaps between all helical tubes using spatial screening.
-    
+
     Uses a two-stage approach:
     1. Bounding box screening to identify candidate pairs
     2. Detailed distance calculation only for proximate pairs
-    
+
     Args:
         df: DataFrame with particle data.
         margin: Margin in Angstroms for bounding box screening.
         angpix: Pixel size in Angstroms.
-    
+
     Returns:
         DataFrame with overlap analysis containing columns:
         - shorter_tube_id: ID of the shorter tube
@@ -178,6 +222,8 @@ def analyze_tube_overlaps(
         - n_points_shorter: Number of points in shorter tube
         - n_points_longer: Number of points in longer tube
         - avg_distance: Average distance from shorter to longer tube
+        - end_match_frac: Fraction of shorter-tube matches near a longer-tube tip
+          (high = likely a broken continuation, not a duplicate)
     """
     tube_ids = df['rlnHelicalTubeID'].unique()
     total_tubes = len(tube_ids)
@@ -209,15 +255,17 @@ def analyze_tube_overlaps(
     for shorter_id, longer_id in proximate_pairs:
         coords_shorter = extract_tube_coordinates(df, shorter_id, angpix)
         coords_longer = extract_tube_coordinates(df, longer_id, angpix)
-        
+
         avg_distance = compute_proximity_score(coords_shorter, coords_longer)
-        
+        end_match_frac = compute_endpoint_continuation_fraction(coords_shorter, coords_longer)
+
         results.append({
             'shorter_tube_id': shorter_id,
             'longer_tube_id': longer_id,
             'n_points_shorter': len(coords_shorter),
             'n_points_longer': len(coords_longer),
-            'avg_distance': avg_distance
+            'avg_distance': avg_distance,
+            'end_match_frac': end_match_frac
         })
     
     # Create results DataFrame sorted by distance
@@ -232,29 +280,40 @@ def analyze_tube_overlaps(
 
 def identify_overlapping_tubes(
     overlap_analysis: pd.DataFrame,
-    distance_threshold: float
+    distance_threshold: float,
+    end_match_threshold: float = 0.8
 ) -> Set[int]:
     """
     Identify shorter tubes that overlap with longer tubes.
-    
+
+    A pair close enough to flag as "overlapping" is only removed if its matches
+    are NOT concentrated at one end of the longer tube — high `end_match_frac`
+    means the shorter tube is likely a broken continuation of the same filament
+    (left for the Connect step to bridge) rather than a duplicate detection.
+
     Args:
         overlap_analysis: DataFrame from analyze_tube_overlaps.
-        distance_threshold: Maximum average distance in Angstroms to 
+        distance_threshold: Maximum average distance in Angstroms to
                           consider tubes as overlapping.
-    
+        end_match_threshold: Above this fraction of end-concentrated matches,
+                          treat the pair as a continuation and keep both tubes.
+
     Returns:
         Set of shorter tube IDs that should be removed.
     """
     if overlap_analysis.empty:
         return set()
-    
-    overlapping = overlap_analysis[overlap_analysis['avg_distance'] < distance_threshold]
-    
+
+    overlapping = overlap_analysis[
+        (overlap_analysis['avg_distance'] < distance_threshold) &
+        (overlap_analysis['end_match_frac'] < end_match_threshold)
+    ]
+
     if not overlapping.empty:
         tubes_to_remove = set(overlapping['shorter_tube_id'].unique())
         print(f"\nIdentified {len(tubes_to_remove)} overlapping tubes to remove")
         return tubes_to_remove
-    
+
     return set()
 
 
@@ -525,6 +584,83 @@ def filter_by_direction(
     return df
     
 
+def compute_tube_max_bend(coords: np.ndarray) -> float:
+    """
+    Compute the maximum bend angle (degrees) anywhere along a tube.
+
+    For each interior particle i, measures the angle between vectors
+    (p[i] - p[i-1]) and (p[i+1] - p[i]).  0° = straight, 90° = right angle.
+    Returns 0 if the tube has fewer than 3 particles.
+    """
+    if len(coords) < 3:
+        return 0.0
+
+    v1 = coords[1:-1] - coords[:-2]   # (N-2, 3)
+    v2 = coords[2:]   - coords[1:-1]  # (N-2, 3)
+
+    norms1 = np.linalg.norm(v1, axis=1, keepdims=True)
+    norms2 = np.linalg.norm(v2, axis=1, keepdims=True)
+
+    # avoid divide-by-zero for duplicate points
+    safe = (norms1 > 0).ravel() & (norms2 > 0).ravel()
+    if not np.any(safe):
+        return 0.0
+
+    cos_angles = np.clip(
+        np.sum(v1[safe] / norms1[safe] * v2[safe] / norms2[safe], axis=1),
+        -1.0, 1.0
+    )
+    return float(np.degrees(np.arccos(cos_angles)).max())
+
+
+def filter_by_curvature(
+    df: pd.DataFrame,
+    angpix: float,
+    max_bend_angle: float,
+) -> pd.DataFrame:
+    """
+    Remove tubes where any consecutive-segment bend exceeds max_bend_angle.
+
+    Args:
+        df: DataFrame with particle data.
+        angpix: Pixel size in Angstroms (coordinates are in pixels).
+        max_bend_angle: Maximum allowed bend angle in degrees (0 = disabled).
+
+    Returns:
+        Filtered DataFrame with over-bent tubes removed.
+    """
+    if max_bend_angle <= 0:
+        return df
+
+    print(f"\n{'='*60}")
+    print("CURVATURE FILTER")
+    print(f"{'='*60}")
+    print(f"  Max bend angle: {max_bend_angle}°")
+
+    tubes_to_remove: Set[int] = set()
+
+    for tube_id, group in df.groupby('rlnHelicalTubeID'):
+        coords = group[['rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ']].to_numpy(dtype=float)
+        coords_ang = coords * angpix
+
+        # Sort by principal axis so bend angles are meaningful
+        if len(coords_ang) > 1:
+            centered = coords_ang - coords_ang.mean(axis=0)
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            order = np.argsort(centered @ Vt[0])
+            coords_ang = coords_ang[order]
+
+        max_bend = compute_tube_max_bend(coords_ang)
+        if max_bend > max_bend_angle:
+            tubes_to_remove.add(tube_id)
+
+    removed_particles = df['rlnHelicalTubeID'].isin(tubes_to_remove).sum()
+    print(f"  Removed {len(tubes_to_remove)} over-bent tubes "
+          f"({removed_particles} particles)")
+
+    return df[~df['rlnHelicalTubeID'].isin(tubes_to_remove)].copy()
+
+
 def clean_tubes(
     df: pd.DataFrame,
     angpix: float,
@@ -534,6 +670,7 @@ def clean_tubes(
     psi_max: float = 180.0,
     direction_angle: str = 'Psi',
     direction_max_dev: float = 0.0,
+    max_curvature: float = 0.0,
 ) -> pd.DataFrame:
     """
     Comprehensive tube cleaning pipeline.
@@ -574,11 +711,15 @@ def clean_tubes(
     # Determine if direction filtering should be applied
     apply_direction_filter = direction_max_dev > 0.0
     
+    apply_curvature_filter = max_curvature > 0.0
+
     # Calculate total number of steps
     total_steps = 1  # Overlap detection is always done
     if apply_psi_filter:
         total_steps += 1
     if apply_direction_filter:
+        total_steps += 1
+    if apply_curvature_filter:
         total_steps += 1
     
     current_step = 0
@@ -616,7 +757,14 @@ def clean_tubes(
         else:
             print(f"  ✓ All particles within deviation threshold")
     
-    # Step 3: Remove overlapping tubes
+    # Step: Curvature filter
+    if apply_curvature_filter:
+        current_step += 1
+        print(f"\n[{current_step}/{total_steps}] Curvature filter (max bend angle: {max_curvature:.1f}°)")
+        print("-" * 60)
+        df = filter_by_curvature(df, angpix, max_curvature)
+
+    # Step: Remove overlapping tubes
     current_step += 1
     print(f"\n[{current_step}/{total_steps}] Overlap detection (threshold: {distance_threshold:.1f} Å)")
     print("-" * 60)

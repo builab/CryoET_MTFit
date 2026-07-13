@@ -48,7 +48,8 @@ def _run_one(filepath, params, output_path):
                 "--min_seed",    str(params["min_seed"]),
                 "--poly_order",  str(params["poly"])]
     if step in ("clean", "pipeline"):
-        cmd += ["--dist_thres",  str(params["clean_dist_thres"])]
+        cmd += ["--dist_thres",    str(params["clean_dist_thres"]),
+                "--max_curvature", str(params["max_curvature"])]
     if step in ("connect", "pipeline"):
         cmd += ["--dist_extrapolate",  str(params["dist_extrapolate"]),
                 "--overlap_thres",     str(params["overlap_thres"]),
@@ -56,6 +57,8 @@ def _run_one(filepath, params, output_path):
     if step in ("predict", "pipeline"):
         cmd += ["--template",     filepath,
                 "--neighbor_rad", str(params["neighbor_rad"])]
+    if step == "twist":
+        cmd += ["--twist_angle", str(params["twist_angle"])]
     env = os.environ.copy()
     env["PYTHONPATH"] = _BUNDLE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -105,6 +108,7 @@ class MTFitTool(ToolInstance):
         self._result_queue = queue.Queue()
         self._running = False
         self._results = []   # list of result dicts for CSV export
+        self._extra_model_ids = []  # models opened outside the results table (e.g. Combine)
 
     def delete(self):
         self.session.triggers.remove_handler(self._add_handler)
@@ -148,10 +152,11 @@ class MTFitTool(ToolInstance):
         step_row.addWidget(QLabel("Run:"))
         self._step_combo = QComboBox()
         self._step_combo.addItem("Full pipeline (Fit → Clean → Connect → Predict)", userData="pipeline")
-        self._step_combo.addItem("1. Fit only",     userData="fit")
-        self._step_combo.addItem("2. Clean only",   userData="clean")
-        self._step_combo.addItem("3. Connect only", userData="connect")
-        self._step_combo.addItem("4. Predict only", userData="predict")
+        self._step_combo.addItem("1. Fit only",                userData="fit")
+        self._step_combo.addItem("2. Clean only",              userData="clean")
+        self._step_combo.addItem("3. Connect only",            userData="connect")
+        self._step_combo.addItem("4. Predict only (cilia)",    userData="predict")
+        self._step_combo.addItem("5. Twist only (MT)",         userData="twist")
         self._step_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         step_row.addWidget(self._step_combo)
         main_layout.addLayout(step_row)
@@ -176,10 +181,16 @@ class MTFitTool(ToolInstance):
         cc_form = QFormLayout(cc_tab)
         cc_form.setContentsMargins(8, 8, 8, 8)
         self._clean_dist_thres  = self._float_spin(1.0,   500.0,   50.0,  1,  "Å")
+        self._max_curvature     = self._float_spin(0.0,   180.0,    0.0,  1,  "°")
+        self._max_curvature.setToolTip(
+            "Max bend angle between consecutive segments (degrees).\n"
+            "Tubes exceeding this are removed. 0 = disabled."
+        )
         self._dist_extrapolate  = self._float_spin(1.0, 10000.0, 2000.0, 10,  "Å")
         self._overlap_thres     = self._float_spin(1.0,   500.0,  100.0,  1,  "Å")
         self._min_part_per_tube = self._int_spin(1, 50, 5)
         cc_form.addRow("Clean dist threshold (Å):", self._clean_dist_thres)
+        cc_form.addRow("Max curvature (°, 0=off):", self._max_curvature)
         cc_form.addRow("Extrapolate distance (Å):", self._dist_extrapolate)
         cc_form.addRow("Overlap threshold (Å):",    self._overlap_thres)
         cc_form.addRow("Min particles per tube:",   self._min_part_per_tube)
@@ -188,9 +199,15 @@ class MTFitTool(ToolInstance):
         pred_tab = QWidget()
         pred_form = QFormLayout(pred_tab)
         pred_form.setContentsMargins(8, 8, 8, 8)
-        self._neighbor_rad = self._float_spin(1.0, 1000.0, 100.0, 1, "Å")
+        self._neighbor_rad  = self._float_spin(1.0,  1000.0, 100.0, 1,   "Å")
+        self._twist_angle   = self._float_spin(-180.0, 180.0,  0.0, 0.1, "°")
+        self._twist_angle.setToolTip(
+            "Degrees added to rlnAnglePsi per particle along each tube.\n"
+            "Used with 'Twist only (MT)' step; ignored otherwise."
+        )
         pred_form.addRow("Neighbor radius (Å):", self._neighbor_rad)
-        tabs.addTab(pred_tab, "Predict")
+        pred_form.addRow("Twist angle/particle (°):", self._twist_angle)
+        tabs.addTab(pred_tab, "Predict / Twist")
 
         main_layout.addWidget(tabs)
 
@@ -202,7 +219,7 @@ class MTFitTool(ToolInstance):
         # Output folder
         out_row = QHBoxLayout()
         self._output_folder_edit = QLineEdit()
-        self._output_folder_edit.setPlaceholderText("Where to save processed files")
+        self._output_folder_edit.setPlaceholderText("Where to save processed files (batch)")
         browse_out_btn = QPushButton("Browse…")
         browse_out_btn.setFixedWidth(65)
         browse_out_btn.clicked.connect(self._browse_output_folder)
@@ -266,19 +283,29 @@ class MTFitTool(ToolInstance):
         self._auto_csv_lbl = QLabel("")
         csv_row.addWidget(self._auto_csv_lbl)
         csv_row.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Clear all rows and close any models MTFit opened for them")
+        clear_btn.clicked.connect(self._clear_results)
+        csv_row.addWidget(clear_btn)
+        combine_btn = QPushButton("Combine Selected…")
+        combine_btn.setToolTip("Combine the checked output files into one STAR file")
+        combine_btn.clicked.connect(self._combine_selected)
+        csv_row.addWidget(combine_btn)
         save_csv_btn = QPushButton("Save CSV…")
         save_csv_btn.setToolTip("Save an additional copy of the results table")
         save_csv_btn.clicked.connect(self._save_csv)
         csv_row.addWidget(save_csv_btn)
         results_layout.addLayout(csv_row)
 
-        self._table = QTableWidget(0, 8)
+        # col 0 = checkbox, 1 = File, 2 = Status, 3-9 = stats / action
+        self._table = QTableWidget(0, 9)
         self._table.setHorizontalHeaderLabels(
-            ["File", "Status", "In ✦", "Out ✦", "Tubes", "Pts/Tube", "Mean Psi°", "Open / Save"]
+            ["", "File", "Status", "In ✦", "Out ✦", "Tubes", "Pts/Tube", "Mean Psi°", "Open / Save / Remove"]
         )
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in (1, 2, 3, 4, 5, 6, 7):
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        for col in (2, 3, 4, 5, 6, 7, 8):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -325,6 +352,20 @@ class MTFitTool(ToolInstance):
     def _on_models_changed(self, trigger_name, changes):
         self._refresh_models()
 
+    def _first_model(self, opened):
+        """Normalize the return value of an 'open' command run() call to a single model."""
+        if isinstance(opened, (list, tuple)):
+            opened = opened[0] if opened else None
+        return opened if opened is not None and hasattr(opened, 'id') else None
+
+    def _close_model(self, model_id):
+        if not model_id:
+            return
+        try:
+            run(self.session, f'close {model_id}')
+        except Exception as e:
+            self.session.logger.warning(f"MTFit: could not close model {model_id}: {e}")
+
     def _refresh_models(self):
         self._model_combo.clear()
         for m in self.session.models:
@@ -354,10 +395,12 @@ class MTFitTool(ToolInstance):
             min_seed         = self._min_seed.value(),
             poly             = self._poly.value(),
             clean_dist_thres = self._clean_dist_thres.value(),
+            max_curvature    = self._max_curvature.value(),
             dist_extrapolate = self._dist_extrapolate.value(),
             overlap_thres    = self._overlap_thres.value(),
             min_part_per_tube= self._min_part_per_tube.value(),
             neighbor_rad     = self._neighbor_rad.value(),
+            twist_angle      = self._twist_angle.value(),
         )
 
     def _apply_params(self, p):
@@ -370,10 +413,12 @@ class MTFitTool(ToolInstance):
         self._min_seed.setValue(p.get("min_seed", 6))
         self._poly.setValue(p.get("poly", 3))
         self._clean_dist_thres.setValue(p.get("clean_dist_thres", 50.0))
+        self._max_curvature.setValue(p.get("max_curvature", 0.0))
         self._dist_extrapolate.setValue(p.get("dist_extrapolate", 2000.0))
         self._overlap_thres.setValue(p.get("overlap_thres", 100.0))
         self._min_part_per_tube.setValue(p.get("min_part_per_tube", 5))
         self._neighbor_rad.setValue(p.get("neighbor_rad", 100.0))
+        self._twist_angle.setValue(p.get("twist_angle", 0.0))
 
     def _auto_save_json(self):
         """Save params to the path in the JSON field, or default path if empty."""
@@ -457,55 +502,72 @@ class MTFitTool(ToolInstance):
         import tempfile
         tmp_dir = tempfile.gettempdir()
         os.makedirs(tmp_dir, exist_ok=True)
-        tmp_star = os.path.join(tmp_dir, os.path.basename(model.name))
-        run(self.session, f'save "{tmp_star}" partlist {model_id}')
+        tmp_name = os.path.basename(model.name)
+        if not tmp_name.lower().endswith('.star'):
+            tmp_name += '.star'
+        tmp_star = os.path.join(tmp_dir, tmp_name)
 
-        suffix   = _OUTPUT_SUFFIX[step]
-        base     = os.path.splitext(os.path.basename(tmp_star))[0]
-        out_dir  = self._output_folder_edit.text().strip() or tmp_dir
-        os.makedirs(out_dir, exist_ok=True)
-        output_path = os.path.join(out_dir, f"{base}{suffix}.star")
-
-        returncode, stderr = _run_one(tmp_star, params, output_path)
-
-        if returncode != 0:
-            lines = [l for l in stderr.strip().splitlines() if l.strip()]
-            note  = lines[-1] if lines else "Unknown error"
-            self._status.setText("Failed — see Log.")
-            self.session.logger.error(f"MTFit '{step}' failed:\n{stderr}")
-            result = dict(status="failed", path=tmp_star, output_path=None,
-                          in_particles="?", note=note,
-                          particles=0, tubes=0, parts_per_tube="", mean_psi="", mean_tilt="")
-        else:
-            # Count input particles
-            try:
-                import starfile
-                df_in = starfile.read(tmp_star)
-                if isinstance(df_in, dict):
-                    df_in = df_in.get("particles", next(iter(df_in.values())))
-                in_count = len(df_in)
-            except Exception:
-                in_count = "?"
-
-            stats = _extract_stats(output_path)
-            run(self.session, f'open "{output_path}" format star')
-            self._status.setText("Done.")
-            result = dict(status="good", path=tmp_star, output_path=output_path,
-                          in_particles=in_count, note="", **stats)
-
-        # Clean up input temp (not output — user may want to re-open)
+        result = None
         try:
-            os.remove(tmp_star)
-        except Exception:
-            pass
+            run(self.session, f'save "{tmp_star}" partlist {model_id}')
+
+            suffix   = _OUTPUT_SUFFIX[step]
+            base     = os.path.splitext(tmp_name)[0]
+            out_dir  = self._output_folder_edit.text().strip() or tmp_dir
+            os.makedirs(out_dir, exist_ok=True)
+            output_path = os.path.join(out_dir, f"{base}{suffix}.star")
+
+            returncode, stderr = _run_one(tmp_star, params, output_path)
+
+            if returncode != 0:
+                lines = [l for l in stderr.strip().splitlines() if l.strip()]
+                note  = lines[-1] if lines else "Unknown error"
+                self._status.setText("Failed — see Log.")
+                self.session.logger.error(f"MTFit '{step}' failed:\n{stderr}")
+                result = dict(status="failed", path=tmp_star, output_path=None,
+                              in_particles="?", note=note,
+                              particles=0, tubes=0, parts_per_tube="", mean_psi="", mean_tilt="")
+            else:
+                try:
+                    import starfile as _sf
+                    df_in = _sf.read(tmp_star)
+                    if isinstance(df_in, dict):
+                        df_in = df_in.get("particles", next(iter(df_in.values())))
+                    in_count = len(df_in)
+                except Exception:
+                    in_count = "?"
+
+                stats = _extract_stats(output_path)
+                opened_model_id = None
+                try:
+                    opened = run(self.session, f'open "{output_path}" format star')
+                    model = self._first_model(opened)
+                    if model is not None:
+                        opened_model_id = '#' + '.'.join(str(i) for i in model.id)
+                except Exception as e:
+                    self.session.logger.warning(f"MTFit: could not auto-open result: {e}")
+                self._status.setText("Done.")
+                result = dict(status="good", path=tmp_star, output_path=output_path,
+                              in_particles=in_count, note="", model_id=opened_model_id, **stats)
+        except Exception as e:
+            self._status.setText("Error — see Log.")
+            self.session.logger.error(f"MTFit: unexpected error in '{step}': {e}")
+            result = dict(status="failed", path=tmp_star, output_path=None,
+                          in_particles="?", note=str(e),
+                          particles=0, tubes=0, parts_per_tube="", mean_psi="", mean_tilt="")
+        finally:
+            try:
+                os.remove(tmp_star)
+            except Exception:
+                pass
 
         self._run_btn.setEnabled(True)
         self._run_batch_btn.setEnabled(True)
         self._show_results()
-        self._results = [result]
-        self._table.setRowCount(0)
-        self._table.insertRow(0)
-        self._fill_row(0, result)
+        self._results.append(result)
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        self._fill_row(row, result)
 
     # ------------------------------------------------------------------
     # Batch
@@ -529,9 +591,10 @@ class MTFitTool(ToolInstance):
         from Qt.QtWidgets import QTableWidgetItem
         for i, path in enumerate(star_files):
             self._table.insertRow(i)
-            self._table.setItem(i, 0, QTableWidgetItem(os.path.basename(path)))
-            self._table.setItem(i, 1, QTableWidgetItem("⏳ Pending"))
-            for col in range(2, 8):
+            self._table.setItem(i, 0, QTableWidgetItem(""))
+            self._table.setItem(i, 1, QTableWidgetItem(os.path.basename(path)))
+            self._table.setItem(i, 2, QTableWidgetItem("⏳ Pending"))
+            for col in range(3, 9):
                 self._table.setItem(i, col, QTableWidgetItem(""))
             self._results.append({"status": "pending", "path": path})
 
@@ -625,8 +688,9 @@ class MTFitTool(ToolInstance):
         self._results_group.setVisible(True)
 
     def _fill_row(self, i, result):
-        from Qt.QtWidgets import QTableWidgetItem, QPushButton
+        from Qt.QtWidgets import QTableWidgetItem, QPushButton, QCheckBox, QWidget, QHBoxLayout
         from Qt.QtGui import QColor
+        from Qt.QtCore import Qt
 
         status = result["status"]
         if status == "good":
@@ -642,8 +706,24 @@ class MTFitTool(ToolInstance):
             label = "⏳ Running"
             color = None
 
+        # col 0: checkbox (only for rows with output)
+        if status in ("good", "problematic") and result.get("output_path"):
+            cb_widget = QWidget()
+            cb_layout = QHBoxLayout(cb_widget)
+            cb_layout.setContentsMargins(4, 0, 4, 0)
+            cb_layout.setAlignment(Qt.AlignCenter)
+            cb = QCheckBox()
+            cb_layout.addWidget(cb)
+            self._table.setCellWidget(i, 0, cb_widget)
+        else:
+            self._table.setCellWidget(i, 0, None)
+            self._table.setItem(i, 0, QTableWidgetItem(""))
+
+        # cols 1-7: text data
+        display_name = (os.path.basename(result["output_path"])
+                        if result.get("output_path") else os.path.basename(result["path"]))
         vals = [
-            os.path.basename(result["path"]),
+            display_name,
             label,
             str(result.get("in_particles", "")),
             str(result.get("particles", "")),
@@ -651,15 +731,16 @@ class MTFitTool(ToolInstance):
             str(result.get("parts_per_tube", "")),
             str(result.get("mean_psi", "")),
         ]
-        for col, val in enumerate(vals):
-            item = self._table.item(i, col) or __import__("Qt.QtWidgets", fromlist=["QTableWidgetItem"]).QTableWidgetItem()
+        for offset, val in enumerate(vals):
+            col = offset + 1
+            item = self._table.item(i, col) or QTableWidgetItem()
             item.setText(val)
             self._table.setItem(i, col, item)
             if color:
                 item.setBackground(color)
 
+        # col 8: Open / Save buttons
         if status in ("good", "problematic") and result.get("output_path"):
-            from Qt.QtWidgets import QWidget, QHBoxLayout
             path = result["output_path"]
             cell = QWidget()
             cell_layout = QHBoxLayout(cell)
@@ -668,8 +749,7 @@ class MTFitTool(ToolInstance):
 
             open_btn = QPushButton("Open")
             open_btn.setFixedWidth(48)
-            open_btn.clicked.connect(
-                lambda _c, p=path: run(self.session, f'open "{p}" format star'))
+            open_btn.clicked.connect(lambda _c, p=path, row=i: self._open_row(row, p))
 
             save_btn = QPushButton("Save")
             save_btn.setFixedWidth(44)
@@ -679,33 +759,111 @@ class MTFitTool(ToolInstance):
                 "output file to the Output folder.")
             save_btn.clicked.connect(lambda _c, p=path: self._save_row(p))
 
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedWidth(24)
+            remove_btn.setToolTip(
+                "Close this row's model in ChimeraX (does not delete the output file)")
+            remove_btn.clicked.connect(lambda _c, row=i: self._remove_row(row))
+
             cell_layout.addWidget(open_btn)
             cell_layout.addWidget(save_btn)
-            self._table.setCellWidget(i, 7, cell)
+            cell_layout.addWidget(remove_btn)
+            self._table.setCellWidget(i, 8, cell)
+
+    def _open_row(self, row, path):
+        try:
+            opened = run(self.session, f'open "{path}" format star')
+            model = self._first_model(opened)
+            if model is not None:
+                self._results[row]["model_id"] = '#' + '.'.join(str(i) for i in model.id)
+        except Exception as e:
+            self.session.logger.warning(f"MTFit: could not open {path}: {e}")
+
+    def _remove_row(self, row):
+        model_id = self._results[row].get("model_id")
+        if not model_id:
+            self.session.logger.info("MTFit: nothing open for this row.")
+            return
+        self._close_model(model_id)
+        self._results[row]["model_id"] = None
 
     def _save_row(self, output_path):
-        """Save the matching open ChimeraX model back to disk (after manual edits)."""
+        """Save the matching open ChimeraX model to a user-chosen location."""
+        from Qt.QtWidgets import QFileDialog
         basename = os.path.basename(output_path)
-        # Find a loaded model whose name matches
+
+        default_dir = self._output_folder_edit.text().strip() or os.path.expanduser("~")
+        save_path, _ = QFileDialog.getSaveFileName(
+            None, "Save particle list as", os.path.join(default_dir, basename),
+            "STAR files (*.star)"
+        )
+        if not save_path:
+            return
+
+        # If the file is open in ChimeraX, save from the live model
         model = next((m for m in self.session.models
                       if hasattr(m, 'name') and m.name == basename), None)
-        if model is None:
-            # Fall back: copy output file to output folder if set
-            out_dir = self._output_folder_edit.text().strip()
-            if out_dir and os.path.exists(output_path):
-                import shutil
-                dest = os.path.join(out_dir, basename)
-                shutil.copy2(output_path, dest)
-                self.session.logger.info(f"MTFit: copied to {dest}")
-            else:
-                self.session.logger.warning(
-                    "MTFit: open the file in ChimeraX first to save edits.")
+        if model is not None:
+            model_id = '#' + '.'.join(str(i) for i in model.id)
+            run(self.session, f'save "{save_path}" partlist {model_id}')
+        elif os.path.exists(output_path):
+            import shutil
+            shutil.copy2(output_path, save_path)
+        else:
+            self.session.logger.warning("MTFit: output file not found — open it first.")
             return
-        model_id = '#' + '.'.join(str(i) for i in model.id)
-        out_dir  = self._output_folder_edit.text().strip()
-        save_path = os.path.join(out_dir, basename) if out_dir else output_path
-        run(self.session, f'save "{save_path}" partlist {model_id}')
         self.session.logger.info(f"MTFit: saved to {save_path}")
+
+    def _clear_results(self):
+        for r in self._results:
+            self._close_model(r.get("model_id"))
+        for model_id in self._extra_model_ids:
+            self._close_model(model_id)
+        self._extra_model_ids = []
+        self._results = []
+        self._table.setRowCount(0)
+        self._auto_csv_lbl.setText("")
+
+    def _combine_selected(self):
+        """Combine the checked output STAR files into one file."""
+        from Qt.QtWidgets import QCheckBox, QFileDialog
+
+        checked_paths = []
+        for row in range(self._table.rowCount()):
+            cb_widget = self._table.cellWidget(row, 0)
+            if cb_widget is None:
+                continue
+            cb = cb_widget.findChild(QCheckBox)
+            if cb is not None and cb.isChecked():
+                result = self._results[row]
+                path = result.get("output_path")
+                if path and os.path.exists(path):
+                    checked_paths.append(path)
+
+        if not checked_paths:
+            self.session.logger.warning("MTFit: no rows checked for combining.")
+            return
+
+        out_dir = self._output_folder_edit.text().strip() or os.path.expanduser("~")
+        default = os.path.join(out_dir, "combined.star")
+        out_path, _ = QFileDialog.getSaveFileName(
+            None, "Save combined STAR file as", default, "STAR files (*.star)"
+        )
+        if not out_path:
+            return
+
+        try:
+            from .utils.io import combine_star_files
+            combine_star_files(checked_paths, out_path)
+            self.session.logger.info(
+                f"MTFit: combined {len(checked_paths)} files → {out_path}"
+            )
+            opened = run(self.session, f'open "{out_path}" format star')
+            model = self._first_model(opened)
+            if model is not None:
+                self._extra_model_ids.append('#' + '.'.join(str(i) for i in model.id))
+        except Exception as e:
+            self.session.logger.error(f"MTFit: combine failed: {e}")
 
     def _auto_save_csv(self):
         """Auto-save CSV to output folder after batch completes."""

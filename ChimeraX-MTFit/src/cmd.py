@@ -12,13 +12,14 @@ from chimerax.core.commands import (
 TEMPDIR = "/tmp"
 
 # Steps that can be run individually, in pipeline order
-STEPS = ("pipeline", "fit", "clean", "connect", "predict")
+STEPS = ("pipeline", "fit", "clean", "connect", "predict", "twist")
 
 _OUTPUT_SUFFIX = {
     "fit":      "_fitted",
     "clean":    "_cleaned",
     "connect":  "_connected",
     "predict":  "_predicted",
+    "twist":    "_twisted",
     "pipeline": "_processed",
 }
 
@@ -58,10 +59,12 @@ def mtfit(session,
           min_seed=6,
           poly=3,
           clean_dist_thres=50.0,
+          max_curvature=0.0,
           dist_extrapolate=2000.0,
           overlap_thres=100.0,
           min_part_per_tube=5,
-          neighbor_rad=100.0):
+          neighbor_rad=100.0,
+          twist_angle=0.0):
     """Run the full MT fitting pipeline, or just a single step of it, on a particle list model."""
 
     mt_fit_script = _bundled_script()
@@ -90,7 +93,8 @@ def mtfit(session,
                 "--min_seed", str(min_seed),
                 "--poly_order", str(poly)]
     if step in ("clean", "pipeline"):
-        cmd += ["--dist_thres", str(clean_dist_thres)]
+        cmd += ["--dist_thres",    str(clean_dist_thres),
+                "--max_curvature", str(max_curvature)]
     if step in ("connect", "pipeline"):
         cmd += ["--dist_extrapolate", str(dist_extrapolate),
                 "--overlap_thres", str(overlap_thres),
@@ -98,6 +102,8 @@ def mtfit(session,
     if step in ("predict", "pipeline"):
         cmd += ["--template", tmp_star,
                 "--neighbor_rad", str(neighbor_rad)]
+    if step == "twist":
+        cmd += ["--twist_angle", str(twist_angle)]
 
     # utils/ is bundled alongside this file — add to PYTHONPATH
     env = os.environ.copy()
@@ -147,10 +153,12 @@ def register_commands(logger):
             ("min_seed",          IntArg),
             ("poly",              IntArg),
             ("clean_dist_thres",  FloatArg),
+            ("max_curvature",     FloatArg),
             ("dist_extrapolate",  FloatArg),
             ("overlap_thres",     FloatArg),
             ("min_part_per_tube", IntArg),
             ("neighbor_rad",      FloatArg),
+            ("twist_angle",       FloatArg),
         ],
         synopsis="Run the full MT fitting pipeline, or a single step (fit/clean/connect/predict), on a particle list model",
     ), mtfit)

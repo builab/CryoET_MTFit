@@ -5,6 +5,7 @@ ChimeraX_MTFit.egg-info/dependency_links.txt
 ChimeraX_MTFit.egg-info/requires.txt
 ChimeraX_MTFit.egg-info/top_level.txt
 src/__init__.py
+src/batch.py
 src/cmd.py
 src/mt_fit.py
 src/tool.py

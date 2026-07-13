@@ -34,7 +34,7 @@ from utils.clean import (
     filter_by_direction
 )
     
-from utils.io import read_star, write_star, validate_dataframe, load_coordinates, write_copick
+from utils.io import read_star, write_star, renumber_tubes, validate_dataframe, load_coordinates, write_copick
 
 # =============================================================================
 # CONSTANTS
@@ -91,6 +91,7 @@ def save_output_or_exit(df: pd.DataFrame, output_file: str, success_msg: str = N
     success_msg : optional custom success message (default: "Output saved to: {output_file}")
     """
     if not df.empty:
+        df = renumber_tubes(df)
         write_star(df, output_file, overwrite=True)
         msg = success_msg if success_msg else f"Output saved to: {output_file}"
         print_success(msg)
@@ -134,6 +135,9 @@ def add_fit_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_clean_arguments(parser: argparse.ArgumentParser) -> None:
     """Add cleaning-specific arguments."""
+    parser.add_argument('--max_curvature', type=float, default=0.0,
+                       help='Max bend angle (degrees) between consecutive segments; '
+                            'tubes exceeding this are removed (default: 0 = disabled)')
     parser.add_argument('--dist_thres', type=float, default=50,
                        help='Overlap removal threshold in Angstroms (default: 50)')
     parser.add_argument('--margin', type=float, default=500,
@@ -183,6 +187,12 @@ def add_predict_arguments(parser: argparse.ArgumentParser) -> None:
                             help='0: Keep as is, 1: Flip Psi direction')                   
           
                        
+def add_twist_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add twist-specific arguments."""
+    parser.add_argument('--twist_angle', type=float, default=0.0,
+                       help='Angular increment in degrees per particle along each tube (default: 0.0)')
+
+
 def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
     """Add predict-specific arguments."""
     parser.add_argument('--n_cilia', type=int, default=None,
@@ -311,7 +321,8 @@ def run_cleaning(df_input: pd.DataFrame, args: argparse.Namespace, step_num: int
         psi_min=args.psi_min,
         psi_max=args.psi_max,
         direction_angle=args.direction_angle,
-        direction_max_dev=args.direction_dev
+        direction_max_dev=args.direction_dev,
+        max_curvature=getattr(args, 'max_curvature', 0.0),
     )
 
     return df_filtered
@@ -526,7 +537,11 @@ def cmd_connect(args: argparse.Namespace) -> None:
     try:
         # Read input
         df_input = read_star(args.input)
-        
+
+        if 'rlnHelicalTubeID' not in df_input.columns:
+            print_error("Input file has no rlnHelicalTubeID column — run 'fit' step first before connect.")
+            sys.exit(1)
+
         df_connected = run_connection(df_input, args)
         
         save_output_or_exit(df_connected, output_file)
@@ -555,6 +570,19 @@ def cmd_predict(args: argparse.Namespace) -> None:
         print_error(f"{e}")
         sys.exit(1)
         
+def cmd_twist(args: argparse.Namespace) -> None:
+    """Execute twist subcommand — assign rlnAnglePsi via fixed angular increment per particle."""
+    output_file = args.output or f"{os.path.splitext(args.input)[0]}_twisted.star"
+    try:
+        df_input = read_star(args.input)
+        from utils.predict import assign_twist_angles
+        df_twisted = assign_twist_angles(df_input, args.twist_angle)
+        save_output_or_exit(df_twisted, output_file)
+    except Exception as e:
+        print_error(f"{e}")
+        sys.exit(1)
+
+
 def cmd_sort(args: argparse.Namespace) -> None:
     """Execute sort subcommand."""
     output_file = args.output or f"{os.path.splitext(args.input)[0]}_sorted.star"
@@ -717,6 +745,12 @@ Examples:
     add_predict_arguments(predict_parser)
     predict_parser.set_defaults(func=cmd_predict)
     
+    # TWIST subcommand
+    twist_parser = subparsers.add_parser('twist', help='Assign rlnAnglePsi via fixed twist angle per particle (for MTs)')
+    add_common_arguments(twist_parser)
+    add_twist_arguments(twist_parser)
+    twist_parser.set_defaults(func=cmd_twist)
+
     # SORT subcommand
     sort_parser = subparsers.add_parser('sort', help='Group cilia and sort doublet order')
     add_common_arguments(sort_parser)
