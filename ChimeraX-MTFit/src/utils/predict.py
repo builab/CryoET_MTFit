@@ -514,6 +514,62 @@ def smooth_angles(df):
     return df_corrected
 
 
+def smooth_rot_angle(
+    df: pd.DataFrame,
+    smoothing_factor: float = 0.5,
+    window: int = 5,
+) -> pd.DataFrame:
+    """
+    Locally smooth rlnAngleRot along each tube.
+
+    Unlike smooth_angles(), which only replaces particles flagged as
+    statistical outliers, this blends every particle's Rot angle with the
+    circular mean of a sliding window of its neighbors along the tube
+    (picking order). `smoothing_factor` controls the blend: 0 leaves angles
+    untouched, 1 fully replaces them with the local window average. Useful
+    for residual wobble that isn't extreme enough to be flagged as an
+    outlier, e.g. right at a Connect join.
+
+    Args:
+        df: DataFrame with rlnHelicalTubeID and rlnAngleRot columns.
+        smoothing_factor: Blend weight for the local average, 0-1.
+        window: Number of neighboring particles (centered) to average over.
+
+    Returns:
+        DataFrame with rlnAngleRot smoothed.
+    """
+    if not 0.0 <= smoothing_factor <= 1.0:
+        raise ValueError("smoothing_factor must be between 0 and 1")
+    if 'rlnHelicalTubeID' not in df.columns:
+        raise ValueError("rlnHelicalTubeID column required for Rot smoothing")
+    if 'rlnAngleRot' not in df.columns:
+        raise ValueError("rlnAngleRot column required for Rot smoothing")
+    if window < 1:
+        raise ValueError("window must be at least 1")
+
+    df_out = df.copy()
+    half = window // 2
+
+    for tube_id, group in df_out.groupby('rlnHelicalTubeID'):
+        idx = group.index
+        angles = group['rlnAngleRot'].to_numpy(dtype=float)
+        n = len(angles)
+        blended = np.empty(n)
+
+        for i in range(n):
+            lo = max(0, i - half)
+            hi = min(n, i + half + 1)
+            local_mean = circular_mean(angles[lo:hi])
+            blended[i] = circular_mean(
+                np.array([angles[i], local_mean]),
+                weights=np.array([1.0 - smoothing_factor, smoothing_factor])
+            )
+
+        df_out.loc[idx, 'rlnAngleRot'] = normalize_angle(blended)
+
+    return df_out
+
+
 def assign_twist_angles(
     df: pd.DataFrame,
     twist_angle: float,
@@ -572,7 +628,9 @@ def predict_angles(
     lcc_keep_percent: float = 80.0,
     snap_max_delta: float = 20.0,
     snap_min_points: int = 5,
-    direction: int = 0
+    direction: int = 0,
+    rot_smooth_factor: float = 0.0,
+    rot_smooth_window: int = 5
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     
     df_working = df_input.copy()
@@ -604,5 +662,8 @@ def predict_angles(
     df_final['rlnAngleRot'] = normalize_angle(df_final['rlnAngleRot'].values)
     
     df_corrected = smooth_angles(df_final) #
-    
+
+    if rot_smooth_factor > 0.0:
+        df_corrected = smooth_rot_angle(df_corrected, rot_smooth_factor, rot_smooth_window)
+
     return df_corrected, intermediates

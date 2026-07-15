@@ -183,8 +183,12 @@ def add_predict_arguments(parser: argparse.ArgumentParser) -> None:
                        help='Max angle deviation within same tube in degrees (default: 20)')
     parser.add_argument('--lcc_keep_percentage', type=float, default=DEFAULT_LCC_KEEP_PERCENTAGE,
                        help=f'Percentage of LCC particles to keep (default: {DEFAULT_LCC_KEEP_PERCENTAGE})')
-    parser.add_argument('--direction', type=int, choices=[0, 1], default=0, 
-                            help='0: Keep as is, 1: Flip Psi direction')                   
+    parser.add_argument('--direction', type=int, choices=[0, 1], default=0,
+                            help='0: Keep as is, 1: Flip Psi direction')
+    parser.add_argument('--rot_smooth_factor', type=float, default=0.0,
+                       help='Blend weight (0-1) for local Rot angle smoothing; 0 disables it (default: 0.0)')
+    parser.add_argument('--rot_smooth_window', type=int, default=5,
+                       help='Number of neighboring particles to average over for Rot smoothing (default: 5)')
           
                        
 def add_twist_arguments(parser: argparse.ArgumentParser) -> None:
@@ -437,7 +441,9 @@ def run_prediction(df_input: pd.DataFrame, df_template: pd.DataFrame,
         lcc_keep_percent=args.lcc_keep_percentage,
         snap_max_delta=args.max_delta_deg,
         snap_min_points=5,
-        direction=args.direction)
+        direction=args.direction,
+        rot_smooth_factor=args.rot_smooth_factor,
+        rot_smooth_window=args.rot_smooth_window)
     
     print_summary("Prediction Results", [
         f"Particles with predicted angles: {len(df_all[0])}"

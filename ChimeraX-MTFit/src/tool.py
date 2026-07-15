@@ -56,7 +56,9 @@ def _run_one(filepath, params, output_path):
                 "--min_part_per_tube", str(params["min_part_per_tube"])]
     if step in ("predict", "pipeline"):
         cmd += ["--template",     filepath,
-                "--neighbor_rad", str(params["neighbor_rad"])]
+                "--neighbor_rad", str(params["neighbor_rad"]),
+                "--rot_smooth_factor", str(params["rot_smooth_factor"]),
+                "--rot_smooth_window", str(params["rot_smooth_window"])]
     if step == "twist":
         cmd += ["--twist_angle", str(params["twist_angle"])]
     env = os.environ.copy()
@@ -205,8 +207,18 @@ class MTFitTool(ToolInstance):
             "Degrees added to rlnAnglePsi per particle along each tube.\n"
             "Used with 'Twist only (MT)' step; ignored otherwise."
         )
+        self._rot_smooth_factor = self._float_spin(0.0, 1.0, 0.0, 0.1, "")
+        self._rot_smooth_factor.setToolTip(
+            "Blend weight for local Rot angle smoothing (0 = off, 1 = fully\n"
+            "replaced by the local average). Reduces small residual wobble,\n"
+            "e.g. right at a Connect join, without needing an outlier to trigger."
+        )
+        self._rot_smooth_window = self._int_spin(1, 51, 5)
+        self._rot_smooth_window.setToolTip("Number of neighboring particles to average over for Rot smoothing.")
         pred_form.addRow("Neighbor radius (Å):", self._neighbor_rad)
         pred_form.addRow("Twist angle/particle (°):", self._twist_angle)
+        pred_form.addRow("Rot smoothing factor (0-1):", self._rot_smooth_factor)
+        pred_form.addRow("Rot smoothing window:", self._rot_smooth_window)
         tabs.addTab(pred_tab, "Predict / Twist")
 
         main_layout.addWidget(tabs)
@@ -401,6 +413,8 @@ class MTFitTool(ToolInstance):
             min_part_per_tube= self._min_part_per_tube.value(),
             neighbor_rad     = self._neighbor_rad.value(),
             twist_angle      = self._twist_angle.value(),
+            rot_smooth_factor= self._rot_smooth_factor.value(),
+            rot_smooth_window= self._rot_smooth_window.value(),
         )
 
     def _apply_params(self, p):
@@ -419,6 +433,8 @@ class MTFitTool(ToolInstance):
         self._min_part_per_tube.setValue(p.get("min_part_per_tube", 5))
         self._neighbor_rad.setValue(p.get("neighbor_rad", 100.0))
         self._twist_angle.setValue(p.get("twist_angle", 0.0))
+        self._rot_smooth_factor.setValue(p.get("rot_smooth_factor", 0.0))
+        self._rot_smooth_window.setValue(p.get("rot_smooth_window", 5))
 
     def _auto_save_json(self):
         """Save params to the path in the JSON field, or default path if empty."""
@@ -757,7 +773,7 @@ class MTFitTool(ToolInstance):
                 "Save the currently-open ChimeraX model back to this file "
                 "(use after manual edits). If no model is open, copies the "
                 "output file to the Output folder.")
-            save_btn.clicked.connect(lambda _c, p=path: self._save_row(p))
+            save_btn.clicked.connect(lambda _c, p=path, row=i: self._save_row(row, p))
 
             remove_btn = QPushButton("✕")
             remove_btn.setFixedWidth(24)
@@ -787,8 +803,8 @@ class MTFitTool(ToolInstance):
         self._close_model(model_id)
         self._results[row]["model_id"] = None
 
-    def _save_row(self, output_path):
-        """Save the matching open ChimeraX model to a user-chosen location."""
+    def _save_row(self, row, output_path):
+        """Save this row's own tracked ChimeraX model to a user-chosen location."""
         from Qt.QtWidgets import QFileDialog
         basename = os.path.basename(output_path)
 
@@ -800,11 +816,14 @@ class MTFitTool(ToolInstance):
         if not save_path:
             return
 
-        # If the file is open in ChimeraX, save from the live model
+        # Use the model this specific row opened — not a name-based search, since
+        # MTFit reuses the same output filename across re-runs of the same input,
+        # so multiple rows can have same-named models open simultaneously and a
+        # name search would silently grab the wrong (e.g. stale) one.
+        model_id = self._results[row].get("model_id")
         model = next((m for m in self.session.models
-                      if hasattr(m, 'name') and m.name == basename), None)
+                      if '#' + '.'.join(str(i) for i in m.id) == model_id), None) if model_id else None
         if model is not None:
-            model_id = '#' + '.'.join(str(i) for i in model.id)
             run(self.session, f'save "{save_path}" partlist {model_id}')
         elif os.path.exists(output_path):
             import shutil
