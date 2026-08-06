@@ -639,6 +639,80 @@ def refit_and_resample_all_tubes(
     return df_output[required_cols]
     
     
+def join_two_tubes(
+    df: pd.DataFrame,
+    tube_id_a: int,
+    tube_id_b: int,
+    poly_order: int,
+    sample_step: float,
+    angpix: float
+) -> pd.DataFrame:
+    """
+    Manually merge two tube IDs into one filament.
+
+    Only the merged tube is refit/resampled into one smooth curve through both
+    original segments (rlnAngleTilt/Psi recomputed from the new curve shape,
+    rlnAngleRot reset to 0, same as an automatic Connect merge or the initial
+    Fit step). Every OTHER tube's particles are left completely untouched --
+    identical coordinates and angles -- so a downstream Predict re-run only
+    needs to actually change the merged tube; re-running Predict on the whole
+    file afterward is still safe, since untouched tubes' positions didn't
+    move and should map back to the same angles.
+
+    Args:
+        df: DataFrame with particle data (coordinates in pixels).
+        tube_id_a: Tube ID to keep.
+        tube_id_b: Tube ID to merge into tube_id_a.
+        poly_order: Polynomial order for the merged tube's refit.
+        sample_step: Resampling step size in Angstroms.
+        angpix: Pixel size in Angstroms.
+
+    Returns:
+        DataFrame with the two tubes merged and refit; all other tubes
+        unchanged apart from consecutive ID renumbering (a relabeling only).
+    """
+    required_cols = [
+        'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ',
+        'rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi',
+        'rlnHelicalTubeID', 'rlnTomoName', 'rlnImagePixelSize'
+    ]
+
+    existing_ids = set(df['rlnHelicalTubeID'].unique())
+    if tube_id_a not in existing_ids or tube_id_b not in existing_ids:
+        raise ValueError(f"Tube IDs {tube_id_a} and/or {tube_id_b} not found in data")
+    if tube_id_a == tube_id_b:
+        raise ValueError("Cannot join a tube with itself")
+
+    df_merged = df.copy()
+    df_merged.loc[df_merged['rlnHelicalTubeID'] == tube_id_b, 'rlnHelicalTubeID'] = tube_id_a
+
+    other_tubes = df_merged[df_merged['rlnHelicalTubeID'] != tube_id_a].copy()
+    joined_tube = df_merged[df_merged['rlnHelicalTubeID'] == tube_id_a]
+
+    resampled = fit_and_resample_tube(joined_tube, poly_order, sample_step, angpix, tube_id_a)
+    if not resampled:
+        raise ValueError(
+            "Refit failed for the joined tube (insufficient points for the chosen polynomial order)")
+    joined_df = pd.DataFrame(resampled)
+
+    for col in required_cols:
+        if col not in other_tubes.columns:
+            other_tubes[col] = 0.0
+        if col not in joined_df.columns:
+            joined_df[col] = 0.0
+
+    combined = pd.concat(
+        [other_tubes[required_cols], joined_df[required_cols]], ignore_index=True
+    )
+
+    # Renumber consecutively -- a relabeling only, doesn't touch any row's data
+    unique_ids = combined['rlnHelicalTubeID'].unique()
+    id_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_ids, start=1)}
+    combined['rlnHelicalTubeID'] = combined['rlnHelicalTubeID'].map(id_mapping)
+
+    return combined
+
+
 def resolve_overlapping_tubes(
     df: pd.DataFrame,
     angpix: float,

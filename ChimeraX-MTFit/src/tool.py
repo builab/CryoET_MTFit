@@ -6,18 +6,23 @@ import sys
 import sysconfig
 import threading
 
+import numpy as np
+
 from chimerax.core.tools import ToolInstance
 from chimerax.core.commands import run
 from chimerax.core.models import ADD_MODELS, REMOVE_MODELS
+from chimerax.core.selection import SELECTION_CHANGED
 
 _BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _OUTPUT_SUFFIX = {
-    "fit":      "_fitted",
-    "clean":    "_cleaned",
-    "connect":  "_connected",
-    "predict":  "_predicted",
-    "pipeline": "_processed",
+    "fit":         "_fitted",
+    "clean":       "_cleaned",
+    "connect":     "_connected",
+    "predict":     "_predicted",
+    "pipeline":    "_processed",
+    "pipeline_mt": "_processed",
+    "twist":       "_twisted",
 }
 
 _STEPS = ("pipeline", "fit", "clean", "connect", "predict")
@@ -43,14 +48,14 @@ def _run_one(filepath, params, output_path):
     cmd = [_chimerax_python(), mt_fit, step, filepath,
            "--angpix", str(params["voxel_size"]),
            "-o", output_path]
-    if step in ("fit", "pipeline"):
+    if step in ("fit", "pipeline", "pipeline_mt"):
         cmd += ["--sample_step", str(params["sample_step"]),
                 "--min_seed",    str(params["min_seed"]),
                 "--poly_order",  str(params["poly"])]
-    if step in ("clean", "pipeline"):
+    if step in ("clean", "pipeline", "pipeline_mt"):
         cmd += ["--dist_thres",    str(params["clean_dist_thres"]),
                 "--max_curvature", str(params["max_curvature"])]
-    if step in ("connect", "pipeline"):
+    if step in ("connect", "pipeline", "pipeline_mt"):
         cmd += ["--dist_extrapolate",  str(params["dist_extrapolate"]),
                 "--overlap_thres",     str(params["overlap_thres"]),
                 "--min_part_per_tube", str(params["min_part_per_tube"])]
@@ -61,6 +66,15 @@ def _run_one(filepath, params, output_path):
                 "--rot_smooth_window", str(params["rot_smooth_window"])]
     if step == "twist":
         cmd += ["--twist_angle", str(params["twist_angle"])]
+        if params.get("twist_template"):
+            cmd += ["--template", params["twist_template"],
+                    "--neighbor_rad", str(params["neighbor_rad"])]
+    if step == "pipeline_mt":
+        # Starts from the raw picks, so the input file is already its own
+        # polarity reference -- no separate template field needed here.
+        cmd += ["--twist_angle", str(params["twist_angle"]),
+                "--template", filepath,
+                "--neighbor_rad", str(params["neighbor_rad"])]
     env = os.environ.copy()
     env["PYTHONPATH"] = _BUNDLE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -115,6 +129,7 @@ class MTFitTool(ToolInstance):
     def delete(self):
         self.session.triggers.remove_handler(self._add_handler)
         self.session.triggers.remove_handler(self._remove_handler)
+        self.session.triggers.remove_handler(self._selection_handler)
         super().delete()
 
     # ------------------------------------------------------------------
@@ -141,6 +156,7 @@ class MTFitTool(ToolInstance):
         model_row.addWidget(QLabel("Particle list:"))
         self._model_combo = QComboBox()
         self._model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._model_combo.currentIndexChanged.connect(self._refresh_join_tubes)
         model_row.addWidget(self._model_combo)
         refresh_btn = QPushButton("↻")
         refresh_btn.setFixedWidth(28)
@@ -153,13 +169,15 @@ class MTFitTool(ToolInstance):
         step_row = QHBoxLayout()
         step_row.addWidget(QLabel("Run:"))
         self._step_combo = QComboBox()
-        self._step_combo.addItem("Full pipeline (Fit → Clean → Connect → Predict)", userData="pipeline")
+        self._step_combo.addItem("Full pipeline, cilia (Fit → Clean → Connect → Predict)", userData="pipeline")
+        self._step_combo.addItem("Full pipeline, MT (Fit → Clean → Connect → Twist)", userData="pipeline_mt")
         self._step_combo.addItem("1. Fit only",                userData="fit")
         self._step_combo.addItem("2. Clean only",              userData="clean")
         self._step_combo.addItem("3. Connect only",            userData="connect")
         self._step_combo.addItem("4. Predict only (cilia)",    userData="predict")
         self._step_combo.addItem("5. Twist only (MT)",         userData="twist")
         self._step_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._step_combo.currentIndexChanged.connect(self._on_step_changed)
         step_row.addWidget(self._step_combo)
         main_layout.addLayout(step_row)
 
@@ -169,8 +187,8 @@ class MTFitTool(ToolInstance):
         basic_tab = QWidget()
         basic_form = QFormLayout(basic_tab)
         basic_form.setContentsMargins(8, 8, 8, 8)
-        self._voxel_size  = self._float_spin(1.0,   100.0,  14.0, 1, "Å/px")
-        self._sample_step = self._float_spin(1.0,   500.0,  82.0, 1, "Å")
+        self._voxel_size  = self._float_spin(1.0,   100.0,  14.0, 1)
+        self._sample_step = self._float_spin(1.0,   500.0,  82.0, 1)
         self._min_seed    = self._int_spin(2, 50, 6)
         self._poly        = self._int_spin(1, 5,  3)
         basic_form.addRow("Voxel size (Å/px):", self._voxel_size)
@@ -182,14 +200,14 @@ class MTFitTool(ToolInstance):
         cc_tab = QWidget()
         cc_form = QFormLayout(cc_tab)
         cc_form.setContentsMargins(8, 8, 8, 8)
-        self._clean_dist_thres  = self._float_spin(1.0,   500.0,   50.0,  1,  "Å")
-        self._max_curvature     = self._float_spin(0.0,   180.0,    0.0,  1,  "°")
+        self._clean_dist_thres  = self._float_spin(1.0,   500.0,   50.0,  1)
+        self._max_curvature     = self._float_spin(0.0,   180.0,    0.0,  1)
         self._max_curvature.setToolTip(
             "Max bend angle between consecutive segments (degrees).\n"
             "Tubes exceeding this are removed. 0 = disabled."
         )
-        self._dist_extrapolate  = self._float_spin(1.0, 10000.0, 2000.0, 10,  "Å")
-        self._overlap_thres     = self._float_spin(1.0,   500.0,  100.0,  1,  "Å")
+        self._dist_extrapolate  = self._float_spin(1.0, 10000.0, 2000.0, 10)
+        self._overlap_thres     = self._float_spin(1.0,   500.0,  100.0,  1)
         self._min_part_per_tube = self._int_spin(1, 50, 5)
         cc_form.addRow("Clean dist threshold (Å):", self._clean_dist_thres)
         cc_form.addRow("Max curvature (°, 0=off):", self._max_curvature)
@@ -201,12 +219,8 @@ class MTFitTool(ToolInstance):
         pred_tab = QWidget()
         pred_form = QFormLayout(pred_tab)
         pred_form.setContentsMargins(8, 8, 8, 8)
-        self._neighbor_rad  = self._float_spin(1.0,  1000.0, 100.0, 1,   "Å")
-        self._twist_angle   = self._float_spin(-180.0, 180.0,  0.0, 0.1, "°")
-        self._twist_angle.setToolTip(
-            "Degrees added to rlnAnglePsi per particle along each tube.\n"
-            "Used with 'Twist only (MT)' step; ignored otherwise."
-        )
+        self._neighbor_rad  = self._float_spin(1.0,  1000.0, 100.0, 1)
+        self._twist_angle   = self._float_spin(-180.0, 180.0,  0.0, 0.1)
         self._rot_smooth_factor = self._float_spin(0.0, 1.0, 0.0, 0.1, "")
         self._rot_smooth_factor.setToolTip(
             "Blend weight for local Rot angle smoothing (0 = off, 1 = fully\n"
@@ -217,6 +231,25 @@ class MTFitTool(ToolInstance):
         self._rot_smooth_window.setToolTip("Number of neighboring particles to average over for Rot smoothing.")
         pred_form.addRow("Neighbor radius (Å):", self._neighbor_rad)
         pred_form.addRow("Twist angle/particle (°):", self._twist_angle)
+
+        twist_template_row = QHBoxLayout()
+        self._twist_template_edit = QLineEdit()
+        self._twist_template_edit.setPlaceholderText("Optional: original raw picks, for polarity")
+        self._twist_template_browse_btn = QPushButton("Browse…")
+        self._twist_template_browse_btn.setFixedWidth(65)
+        self._twist_template_browse_btn.clicked.connect(self._browse_twist_template)
+        twist_template_row.addWidget(self._twist_template_edit)
+        twist_template_row.addWidget(self._twist_template_browse_btn)
+        self._twist_template_label = QLabel("Polarity reference (optional):")
+        self._twist_template_label.setToolTip(
+            "Original raw (pre-Fit) picks. Used only to determine each tube's real\n"
+            "polarity so the twist increment is applied with consistent handedness\n"
+            "across tubes -- not saved or kept as output. If left empty, twist falls\n"
+            "back to row order only, which is self-consistent per tube but not\n"
+            "guaranteed consistent between different tubes."
+        )
+        pred_form.addRow(self._twist_template_label, twist_template_row)
+
         pred_form.addRow("Rot smoothing factor (0-1):", self._rot_smooth_factor)
         pred_form.addRow("Rot smoothing window:", self._rot_smooth_window)
         tabs.addTab(pred_tab, "Predict / Twist")
@@ -285,6 +318,49 @@ class MTFitTool(ToolInstance):
         self._status.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self._status)
 
+        # ---- Manual Tube Join ----
+        join_group = QGroupBox("Manual Tube Join")
+        join_layout = QVBoxLayout(join_group)
+
+        join_row = QHBoxLayout()
+        join_row.addWidget(QLabel("Tube A:"))
+        self._join_tube_a = QComboBox()
+        self._join_tube_a.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._join_tube_a.currentIndexChanged.connect(self._highlight_join_selection)
+        join_row.addWidget(self._join_tube_a)
+        join_row.addWidget(QLabel("Tube B:"))
+        self._join_tube_b = QComboBox()
+        self._join_tube_b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._join_tube_b.currentIndexChanged.connect(self._highlight_join_selection)
+        join_row.addWidget(self._join_tube_b)
+        refresh_join_btn = QPushButton("↻")
+        refresh_join_btn.setFixedWidth(28)
+        refresh_join_btn.setToolTip("Refresh tube list from the selected particle list")
+        refresh_join_btn.clicked.connect(self._refresh_join_tubes)
+        join_row.addWidget(refresh_join_btn)
+        join_layout.addLayout(join_row)
+
+        join_hint = QLabel(
+            "Pick two tubes above, or select particles in the 3D view — selecting "
+            "any particle of a tube auto-selects the whole tube and fills Tube A/B."
+        )
+        join_hint.setWordWrap(True)
+        join_layout.addWidget(join_hint)
+
+        self._join_btn = QPushButton("Join Selected Tubes")
+        self._join_btn.clicked.connect(self._join_selected_tubes)
+        join_layout.addWidget(self._join_btn)
+
+        main_layout.addWidget(join_group)
+
+        self._join_model = None
+        self._join_pid_to_tube = {}
+        self._join_tube_to_pids = {}
+        self._join_syncing = False
+        self._join_next_slot = 'a'
+        self._selection_handler = self.session.triggers.add_handler(
+            SELECTION_CHANGED, self._on_chimerax_selection_changed)
+
         # ---- Results table ----
         self._results_group = QGroupBox(
             "Results  (⚠ Problematic = 0 tubes found OR <30% particles retained)"
@@ -333,6 +409,8 @@ class MTFitTool(ToolInstance):
         self._poll_timer.timeout.connect(self._poll_results)
 
         self._refresh_models()
+        self._refresh_join_tubes()
+        self._on_step_changed()
 
     # ------------------------------------------------------------------
     # Widget helpers
@@ -361,8 +439,44 @@ class MTFitTool(ToolInstance):
         if folder:
             self._output_folder_edit.setText(folder)
 
+    def _browse_twist_template(self):
+        from Qt.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            None, "Select original raw picks (polarity reference)", "", "STAR files (*.star)"
+        )
+        if path:
+            self._twist_template_edit.setText(path)
+
     def _on_models_changed(self, trigger_name, changes):
         self._refresh_models()
+
+    def _on_step_changed(self):
+        """Twist angle only ever reaches the CLI when Step is 'Twist only' or
+        'Full pipeline, MT' -- the cilia pipeline and other steps never run a
+        twist stage. Disable the field otherwise so it can't look like it's
+        being applied when it silently isn't."""
+        step = self._step_combo.itemData(self._step_combo.currentIndex())
+        uses_twist = step in ("twist", "pipeline_mt")
+        self._twist_angle.setEnabled(uses_twist)
+
+        # The polarity-reference field is only relevant for standalone Twist --
+        # the MT pipeline starts from the raw picks itself, so it automatically
+        # uses its own input as the polarity reference, no field needed.
+        is_standalone_twist = step == "twist"
+        self._twist_template_edit.setEnabled(is_standalone_twist)
+        self._twist_template_label.setEnabled(is_standalone_twist)
+        self._twist_template_browse_btn.setEnabled(is_standalone_twist)
+
+        if uses_twist:
+            self._twist_angle.setToolTip(
+                "Degrees added to rlnAngleRot per particle along each tube."
+            )
+        else:
+            self._twist_angle.setToolTip(
+                "Only applied when Step is 'Twist only (MT)' or 'Full pipeline, "
+                "MT' -- other steps never run a twist stage, so this value is "
+                "ignored while a different step is selected."
+            )
 
     def _first_model(self, opened):
         """Normalize the return value of an 'open' command run() call to a single model."""
@@ -386,6 +500,230 @@ class MTFitTool(ToolInstance):
                 self._model_combo.addItem(f"{id_str} — {m.name}", userData=id_str)
         if self._model_combo.count() == 0:
             self._model_combo.addItem("No particle lists found")
+
+    def _get_model_by_id(self, model_id):
+        return next((m for m in self.session.models
+                      if '#' + '.'.join(str(i) for i in m.id) == model_id), None)
+
+    def _get_selected_model(self):
+        idx = self._model_combo.currentIndex()
+        model_id = self._model_combo.itemData(idx)
+        if not model_id:
+            return None
+        return self._get_model_by_id(model_id)
+
+    # ------------------------------------------------------------------
+    # Manual Tube Join
+    # ------------------------------------------------------------------
+
+    def _refresh_join_tubes(self):
+        """Rebuild the Tube A/B dropdowns from the currently selected particle list."""
+        self._join_tube_a.blockSignals(True)
+        self._join_tube_b.blockSignals(True)
+        self._join_tube_a.clear()
+        self._join_tube_b.clear()
+
+        model = self._get_selected_model()
+        self._join_model = model
+        self._join_pid_to_tube = {}
+        self._join_tube_to_pids = {}
+        self._join_next_slot = 'a'
+
+        if model is None:
+            self.session.logger.info("MTFit: Manual Join — no particle list selected.")
+        elif not (hasattr(model, 'get_particle') and hasattr(model, 'particle_ids')):
+            self.session.logger.warning(
+                f"MTFit: Manual Join — selected model ({type(model).__name__}) "
+                "isn't an ArtiaX particle list.")
+        else:
+            tube_to_pids = {}
+            pid_to_tube = {}
+            n_errors = 0
+            last_error = None
+            for pid in model.particle_ids:
+                try:
+                    raw_tube_id = model.get_particle(pid)['rlnHelicalTubeID']
+                except Exception as e:
+                    n_errors += 1
+                    last_error = e
+                    continue
+                tube_id = int(round(raw_tube_id))
+                pid_to_tube[pid] = tube_id
+                tube_to_pids.setdefault(tube_id, []).append(pid)
+            self._join_pid_to_tube = pid_to_tube
+            self._join_tube_to_pids = tube_to_pids
+
+            if n_errors and not tube_to_pids:
+                self.session.logger.warning(
+                    f"MTFit: Manual Join — could not read rlnHelicalTubeID for any of "
+                    f"{n_errors} particles ({last_error!r}). Available attributes: "
+                    f"{model.get_particle(model.particle_ids[0]).attributes() if model.size else 'n/a'}")
+            elif n_errors:
+                self.session.logger.info(
+                    f"MTFit: Manual Join — {n_errors} particle(s) missing rlnHelicalTubeID, skipped.")
+
+            for tube_id in sorted(tube_to_pids.keys()):
+                label = f"Tube {tube_id} ({len(tube_to_pids[tube_id])} pts)"
+                self._join_tube_a.addItem(label, userData=tube_id)
+                self._join_tube_b.addItem(label, userData=tube_id)
+
+        if self._join_tube_a.count() == 0:
+            self._join_tube_a.addItem("—", userData=None)
+            self._join_tube_b.addItem("—", userData=None)
+
+        self._join_tube_a.blockSignals(False)
+        self._join_tube_b.blockSignals(False)
+
+    def _highlight_join_selection(self):
+        """Select both chosen tubes' particles in the 3D view."""
+        if self._join_model is None or self._join_syncing:
+            return
+        tube_a = self._join_tube_a.currentData()
+        tube_b = self._join_tube_b.currentData()
+        wanted_pids = set()
+        if tube_a is not None:
+            wanted_pids.update(self._join_tube_to_pids.get(tube_a, []))
+        if tube_b is not None:
+            wanted_pids.update(self._join_tube_to_pids.get(tube_b, []))
+
+        self._join_syncing = True
+        try:
+            mask = np.array([pid in wanted_pids for pid in self._join_model.particle_ids])
+            self._join_model.selected_particles = mask
+        except Exception as e:
+            self.session.logger.warning(f"MTFit: could not highlight tube selection: {e}")
+        finally:
+            self._join_syncing = False
+
+    def _on_chimerax_selection_changed(self, trigger_name, data):
+        """When the user selects particles in the 3D view, auto-expand the
+        selection to the whole tube and fill Tube A/B in rotation: 1st distinct
+        tube picked goes to A, 2nd to B, 3rd back to A (overwriting), and so on
+        -- so redoing a wrong pick is just "select again", no extra buttons."""
+        if self._join_syncing or self._join_model is None:
+            return
+        model = self._join_model
+        try:
+            if model.deleted:
+                return
+            mask = model.selected_particles
+        except Exception:
+            return
+        if mask is None:
+            return
+
+        selected_pids = [pid for pid, sel in zip(model.particle_ids, mask) if sel]
+        if not selected_pids:
+            return
+
+        tube_ids = {self._join_pid_to_tube[pid] for pid in selected_pids
+                    if pid in self._join_pid_to_tube}
+        if len(tube_ids) != 1:
+            return  # ambiguous selection spanning multiple tubes -- don't guess
+        tube_id = next(iter(tube_ids))
+
+        # Expand the selection to the whole tube, if it wasn't already
+        full_pids = set(self._join_tube_to_pids.get(tube_id, []))
+        if full_pids != set(selected_pids):
+            self._join_syncing = True
+            try:
+                mask_full = np.array([pid in full_pids for pid in model.particle_ids])
+                model.selected_particles = mask_full
+            except Exception:
+                pass
+            finally:
+                self._join_syncing = False
+
+        # Don't re-fill a slot that already holds this exact tube
+        current_a = self._join_tube_a.currentData()
+        current_b = self._join_tube_b.currentData()
+        if tube_id in (current_a, current_b):
+            return
+
+        target_combo = self._join_tube_a if self._join_next_slot == 'a' else self._join_tube_b
+        idx = target_combo.findData(tube_id)
+        if idx >= 0:
+            target_combo.blockSignals(True)
+            target_combo.setCurrentIndex(idx)
+            target_combo.blockSignals(False)
+            self._join_next_slot = 'b' if self._join_next_slot == 'a' else 'a'
+            self._highlight_join_selection()
+
+    def _join_selected_tubes(self):
+        tube_a = self._join_tube_a.currentData()
+        tube_b = self._join_tube_b.currentData()
+        if tube_a is None or tube_b is None or tube_a == tube_b:
+            self.session.logger.error("MTFit: pick two different tubes to join.")
+            return
+        model = self._join_model
+        if model is None:
+            self.session.logger.error("MTFit: no particle list selected.")
+            return
+
+        model_id = '#' + '.'.join(str(i) for i in model.id)
+        import tempfile
+        tmp_dir = tempfile.gettempdir()
+        tmp_name = os.path.basename(model.name)
+        if not tmp_name.lower().endswith('.star'):
+            tmp_name += '.star'
+        tmp_star = os.path.join(tmp_dir, tmp_name)
+
+        out_dir = self._output_folder_edit.text().strip() or tmp_dir
+        os.makedirs(out_dir, exist_ok=True)
+        base = os.path.splitext(tmp_name)[0]
+        output_path = os.path.join(out_dir, f"{base}_joined.star")
+
+        in_count = len(model.particle_ids)
+
+        try:
+            run(self.session, f'save "{tmp_star}" partlist {model_id}')
+
+            mt_fit = os.path.join(_BUNDLE_DIR, "mt_fit.py")
+            cmd = [_chimerax_python(), mt_fit, "join", tmp_star,
+                   "--tube_a", str(int(tube_a)), "--tube_b", str(int(tube_b)),
+                   "--angpix", str(self._voxel_size.value()),
+                   "--poly_order", str(self._poly.value()),
+                   "--sample_step", str(self._sample_step.value()),
+                   "-o", output_path]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = _BUNDLE_DIR + os.pathsep + env.get("PYTHONPATH", "")
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+            if proc.returncode != 0:
+                lines = [l for l in proc.stderr.strip().splitlines() if l.strip()]
+                note = lines[-1] if lines else "Unknown error"
+                self.session.logger.error(f"MTFit: join failed: {note}")
+                return
+
+            opened_model_id = None
+            try:
+                opened = run(self.session, f'open "{output_path}" format star')
+                opened_model = self._first_model(opened)
+                if opened_model is not None:
+                    opened_model_id = '#' + '.'.join(str(i) for i in opened_model.id)
+            except Exception as e:
+                self.session.logger.warning(f"MTFit: could not auto-open joined result: {e}")
+
+            stats = _extract_stats(output_path)
+            result = dict(status="good", path=tmp_star, output_path=output_path,
+                          in_particles=in_count,
+                          note=f"Joined tubes {int(tube_a)}+{int(tube_b)}",
+                          model_id=opened_model_id, **stats)
+            self._show_results()
+            self._results.append(result)
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._fill_row(row, result)
+            self.session.logger.info(
+                f"MTFit: joined tubes {int(tube_a)} and {int(tube_b)} -> {output_path}")
+        except Exception as e:
+            self.session.logger.error(f"MTFit: join failed: {e}")
+        finally:
+            try:
+                os.remove(tmp_star)
+            except Exception:
+                pass
+            self._refresh_join_tubes()
 
     # ------------------------------------------------------------------
     # Batch folder + JSON
@@ -413,6 +751,7 @@ class MTFitTool(ToolInstance):
             min_part_per_tube= self._min_part_per_tube.value(),
             neighbor_rad     = self._neighbor_rad.value(),
             twist_angle      = self._twist_angle.value(),
+            twist_template   = self._twist_template_edit.text().strip(),
             rot_smooth_factor= self._rot_smooth_factor.value(),
             rot_smooth_window= self._rot_smooth_window.value(),
         )
@@ -433,6 +772,7 @@ class MTFitTool(ToolInstance):
         self._min_part_per_tube.setValue(p.get("min_part_per_tube", 5))
         self._neighbor_rad.setValue(p.get("neighbor_rad", 100.0))
         self._twist_angle.setValue(p.get("twist_angle", 0.0))
+        self._twist_template_edit.setText(p.get("twist_template", ""))
         self._rot_smooth_factor.setValue(p.get("rot_smooth_factor", 0.0))
         self._rot_smooth_window.setValue(p.get("rot_smooth_window", 5))
 

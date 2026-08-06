@@ -570,25 +570,136 @@ def smooth_rot_angle(
     return df_out
 
 
+def _tilt_psi_to_unit_vector(tilt: np.ndarray, psi: np.ndarray) -> np.ndarray:
+    """
+    Reconstruct the direction a particle's long/symmetry axis points in the
+    tomogram frame, from genuine RELION-convention Euler angles Tilt/Psi.
+
+    Verified numerically against ArtiaX's own RELIONEulerRotation (the code
+    that actually renders these angles in 3D): the matrix
+    Rz(-psi)*Ry(-tilt)*Rz(-rot) applied to the reference Z-axis (0,0,1) gives
+    forward = (-sin(tilt)cos(psi), sin(tilt)sin(psi), cos(tilt)) -- Rot drops
+    out entirely (confirmed by direct numerical test: forward is identical
+    across Rot=0/30/90/180 for fixed Tilt/Psi). That's consistent with Rot
+    being the roll around the particle's own axis (why Twist targets it) and
+    Tilt/Psi being what determines which way that axis actually points.
+
+    This is the correct convention for angles from genuine 3D orientation
+    search (e.g. the raw template-matching picks) -- NOT the same thing as
+    fit.py's resample(), which fabricates its own Tilt/Psi from pure
+    coordinate-tangent geometry and does not follow this convention (an
+    earlier version of this function mixed the two up).
+    """
+    tilt_rad = np.radians(tilt)
+    psi_rad = np.radians(psi)
+    x = -np.sin(tilt_rad) * np.cos(psi_rad)
+    y = np.sin(tilt_rad) * np.sin(psi_rad)
+    z = np.cos(tilt_rad)
+    return np.column_stack([x, y, z])
+
+
+def compute_polarity_flips(
+    df_reference: pd.DataFrame,
+    df_predicted: pd.DataFrame,
+) -> Dict[int, int]:
+    """
+    For each tube, determine whether df_reference's own row order runs the same
+    direction as df_predicted's Tilt/Psi-encoded long-axis orientation, or the
+    opposite.
+
+    df_reference and df_predicted must contain the same particles (same index)
+    for each tube. df_predicted's rlnAngleTilt/rlnAnglePsi are expected to come
+    from genuine template matching (see _tilt_psi_to_unit_vector) -- mapping
+    from fit.py's own synthetic tangent-derived angles here would compare a
+    made-up convention against itself and tell you nothing.
+
+    Returns a dict mapping tube_id -> +1 (row order already agrees with the
+    predicted direction) or -1 (row order runs opposite to it -- a per-tube
+    twist increment should be negated to stay consistently handed relative to
+    every tube's real polarity, not just self-consistent within each tube).
+    """
+    flips: Dict[int, int] = {}
+    for tube_id, ref_group in df_reference.groupby('rlnHelicalTubeID'):
+        coords = ref_group[COORD_COLUMNS].to_numpy(dtype=float)
+        if len(coords) < 2:
+            flips[tube_id] = 1
+            continue
+
+        row_order_dir = coords[-1] - coords[0]
+        norm = np.linalg.norm(row_order_dir)
+        if norm == 0:
+            flips[tube_id] = 1
+            continue
+        row_order_dir = row_order_dir / norm
+
+        pred_group = df_predicted.loc[ref_group.index]
+        vectors = _tilt_psi_to_unit_vector(
+            pred_group['rlnAngleTilt'].to_numpy(dtype=float),
+            pred_group['rlnAnglePsi'].to_numpy(dtype=float),
+        )
+        mean_dir = vectors.mean(axis=0)
+        mean_norm = np.linalg.norm(mean_dir)
+        if mean_norm == 0:
+            flips[tube_id] = 1
+            continue
+        mean_dir = mean_dir / mean_norm
+
+        flips[tube_id] = 1 if np.dot(row_order_dir, mean_dir) >= 0 else -1
+
+    return flips
+
+
 def assign_twist_angles(
     df: pd.DataFrame,
     twist_angle: float,
+    polarity_flips: Optional[Dict[int, int]] = None,
 ) -> pd.DataFrame:
     """
-    Add a fixed angular increment per particle along each tube to the existing rlnAnglePsi.
+    Add a fixed angular increment per particle along each tube to the existing rlnAngleRot.
+
+    rlnAnglePsi/rlnAngleTilt encode the filament's actual local tangent direction
+    (see fit.py's resample(): Psi = tangent azimuth, Tilt = tangent elevation) --
+    they describe where the tube physically points, not a roll around its own
+    axis. rlnAngleRot, applied before Tilt/Psi in RELION's ZYZ convention, is the
+    roll around the particle's own axis before it gets reoriented to point along
+    the tangent -- that's the correct target for modeling real protofilament-to-
+    protofilament twist. Incrementing Psi instead (an earlier version of this
+    function did) rotates the apparent tube direction itself, and since the
+    increment accumulates particle after particle, the misalignment from the
+    true geometric path compounds down the tube, producing an increasingly
+    curled/kinked result instead of a clean twist.
 
     Particles within each tube are ordered by projection onto the tube's principal axis
-    (first PCA component). Particle i gets rlnAnglePsi += i * twist_angle degrees, on top
-    of whatever psi was already assigned (e.g. by the predict step). If rlnAnglePsi is not
-    present, it is initialized to 0 before the twist increment is applied.
-    Only rlnAnglePsi is modified; other columns are left unchanged.
+    (first PCA component). Particle i gets rlnAngleRot += i * twist_angle degrees, on top
+    of whatever Rot was already assigned (e.g. by the predict step, from matched template
+    particles' actual orientation). If rlnAngleRot is not present, it is initialized to 0
+    before the twist increment is applied. Only rlnAngleRot is modified; other columns
+    are left unchanged.
+
+    PCA's principal axis has an inherent sign ambiguity (SVD can return either
+    direction) with no connection to the tube's real biological polarity, so
+    without correction two tubes with the same real-world orientation can get
+    opposite ramp directions purely by numerical coincidence. To keep the
+    ordering at least consistent tube-to-tube, the axis sign is anchored to
+    match the tube's own existing row order (i.e. whatever consistent walk
+    Fit/Connect/Predict's own resampling already established), rather than
+    left to whatever SVD happens to return.
+
+    That anchoring alone only guarantees self-consistency within each tube --
+    not that the ramp is applied with the same real-world handedness across
+    different tubes, since row order has no inherent connection to true
+    plus/minus-end polarity either. If `polarity_flips` is given (see
+    compute_polarity_flips(), typically derived from a genuine template-
+    matched reference), each tube's increment is multiplied by its flip
+    (+1 or -1) so the twist stays consistently handed relative to each
+    tube's real polarity instead of just its arbitrary storage order.
     """
     if 'rlnHelicalTubeID' not in df.columns:
         raise ValueError("rlnHelicalTubeID column required for twist assignment")
 
     df_out = df.copy()
-    if 'rlnAnglePsi' not in df_out.columns:
-        df_out['rlnAnglePsi'] = 0.0
+    if 'rlnAngleRot' not in df_out.columns:
+        df_out['rlnAngleRot'] = 0.0
 
     print(f"\n{'='*60}")
     print("TWIST ANGLE ASSIGNMENT")
@@ -605,14 +716,19 @@ def assign_twist_angles(
             centered = coords - coords.mean(axis=0)
             _, _, Vt = np.linalg.svd(centered, full_matrices=False)
             projections = centered @ Vt[0]
+            # Anchor the arbitrary SVD sign to the tube's own existing row
+            # order, so ramp direction doesn't flip randomly between tubes.
+            if projections[-1] < projections[0]:
+                projections = -projections
             order = np.argsort(projections)
         else:
             order = np.array([0])
 
+        flip = polarity_flips.get(tube_id, 1) if polarity_flips else 1
         indices = group.index[order]
-        increment = np.arange(len(indices)) * twist_angle
-        df_out.loc[indices, 'rlnAnglePsi'] = normalize_angle(
-            df_out.loc[indices, 'rlnAnglePsi'].to_numpy(dtype=float) + increment
+        increment = np.arange(len(indices)) * twist_angle * flip
+        df_out.loc[indices, 'rlnAngleRot'] = normalize_angle(
+            df_out.loc[indices, 'rlnAngleRot'].to_numpy(dtype=float) + increment
         )
 
     print(f"  ✓ Assigned twist angles to {len(tube_ids)} tubes, "

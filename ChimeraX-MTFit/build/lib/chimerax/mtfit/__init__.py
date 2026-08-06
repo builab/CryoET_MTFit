@@ -40,8 +40,16 @@ def _ensure_dependencies():
     if not missing:
         return
 
-    print(f"MTFit: installing missing packages: {missing}")
-    subprocess.check_call([python, "-m", "pip", "install"] + missing)
+    # Install one at a time -- a package that fails to build (e.g. copick pulling in
+    # cryptography, which needs a Rust/OpenSSL toolchain this system may not have)
+    # must not block the others from installing via one combined pip command.
+    for pip_spec in missing:
+        print(f"MTFit: installing missing package: {pip_spec}")
+        try:
+            subprocess.check_call([python, "-m", "pip", "install", pip_spec])
+        except subprocess.CalledProcessError as e:
+            print(f"MTFit: could not install {pip_spec} ({e}); "
+                  f"features needing it will be unavailable.")
 
 
 _ensure_dependencies()

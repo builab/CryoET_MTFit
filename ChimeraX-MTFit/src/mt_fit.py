@@ -195,6 +195,27 @@ def add_twist_arguments(parser: argparse.ArgumentParser) -> None:
     """Add twist-specific arguments."""
     parser.add_argument('--twist_angle', type=float, default=0.0,
                        help='Angular increment in degrees per particle along each tube (default: 0.0)')
+    parser.add_argument('--template', type=str, default=None,
+                       help='Original raw (pre-Fit) picks, used only to determine each tube\'s '
+                            'real polarity so the twist increment is applied with consistent '
+                            'handedness across tubes. Optional -- if omitted, twist falls back to '
+                            'row order only, which is self-consistent per tube but not guaranteed '
+                            'consistent between tubes.')
+    parser.add_argument('--neighbor_rad', type=float, default=100,
+                       help='Search radius in Angstroms for matching template particles when '
+                            'determining polarity (default: 100)')
+
+
+def add_join_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add join-specific arguments."""
+    parser.add_argument('--tube_a', type=int, required=True,
+                       help='First tube ID to join (kept as the merged ID)')
+    parser.add_argument('--tube_b', type=int, required=True,
+                       help='Second tube ID to join (merged into tube_a)')
+    parser.add_argument('--poly_order', type=int, default=3,
+                       help='Polynomial order for the post-merge refit (default: 3)')
+    parser.add_argument('--sample_step', type=float, default=82.0,
+                       help='Resampling step size in Angstroms (default: 82.0)')
 
 
 def add_sort_arguments(parser: argparse.ArgumentParser) -> None:
@@ -577,13 +598,57 @@ def cmd_predict(args: argparse.Namespace) -> None:
         sys.exit(1)
         
 def cmd_twist(args: argparse.Namespace) -> None:
-    """Execute twist subcommand — assign rlnAnglePsi via fixed angular increment per particle."""
+    """Execute twist subcommand — assign rlnAngleRot via fixed angular increment per particle."""
     output_file = args.output or f"{os.path.splitext(args.input)[0]}_twisted.star"
     try:
         df_input = read_star(args.input)
-        from utils.predict import assign_twist_angles
-        df_twisted = assign_twist_angles(df_input, args.twist_angle)
+        from utils.predict import assign_twist_angles, filter_by_lcc, map_angles_from_template, \
+            compute_polarity_flips
+
+        polarity_flips = None
+        template_path = getattr(args, 'template', None)
+        if not template_path:
+            print_warning(
+                "No --template given for polarity correction; applying twist using row "
+                "order only (self-consistent per tube, but not guaranteed consistent "
+                "in real-world handedness between different tubes)."
+            )
+        elif not os.path.exists(template_path):
+            print_warning(f"Template file not found: {template_path}; "
+                          f"applying twist using row order only.")
+        else:
+            print(f"[INFO] Loading polarity reference template from: {template_path}")
+            try:
+                df_template = read_star(template_path)
+                df_filtered = filter_by_lcc(df_input, df_template, args.angpix, args.neighbor_rad)
+                df_temp_predicted = map_angles_from_template(
+                    df_input, df_filtered, args.angpix, args.neighbor_rad)
+                polarity_flips = compute_polarity_flips(df_input, df_temp_predicted)
+                n_flipped = sum(1 for v in polarity_flips.values() if v == -1)
+                print(f"[INFO] Determined polarity for {len(polarity_flips)} tube(s), "
+                      f"{n_flipped} flipped relative to row order.")
+            except Exception as e:
+                print_warning(f"Could not determine polarity from template ({e}); "
+                              f"applying twist using row order only.")
+
+        df_twisted = assign_twist_angles(df_input, args.twist_angle, polarity_flips=polarity_flips)
         save_output_or_exit(df_twisted, output_file)
+    except Exception as e:
+        print_error(f"{e}")
+        sys.exit(1)
+
+
+def cmd_join(args: argparse.Namespace) -> None:
+    """Execute join subcommand — manually merge two tube segments into one."""
+    output_file = args.output or f"{os.path.splitext(args.input)[0]}_joined.star"
+    try:
+        df_input = read_star(args.input)
+        from utils.connect import join_two_tubes
+        df_joined = join_two_tubes(
+            df_input, args.tube_a, args.tube_b,
+            args.poly_order, args.sample_step, args.angpix
+        )
+        save_output_or_exit(df_joined, output_file)
     except Exception as e:
         print_error(f"{e}")
         sys.exit(1)
@@ -686,7 +751,84 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         else:
             print_warning("Pipeline produced no output particles")
             sys.exit(1)
-            
+
+    except Exception as e:
+        print_error(f"{e}")
+        sys.exit(1)
+
+
+def cmd_pipeline_mt(args: argparse.Namespace) -> None:
+    """
+    Execute the MT pipeline: Fit -> Clean -> Connect -> Twist.
+
+    Unlike cmd_pipeline (which ends in Predict, for cilia), this ends in Twist:
+    Predict's per-particle angles are not reliable for MT's near-rotationally-
+    symmetric geometry, so Rot is never kept from a real predict step. Instead,
+    the original raw picks (this pipeline's own input) are used internally,
+    once, purely to determine each tube's real polarity -- never saved as a
+    separate output -- and Twist applies its ramp on top of Connect's clean
+    geometric angles with that polarity already accounted for.
+    """
+    output_file = args.output or f"{os.path.splitext(args.input)[0]}_processed.star"
+
+    print("="*80)
+    print("MT FILAMENT PROCESSING PIPELINE (FIT -> CLEAN -> CONNECT -> TWIST)")
+    print("="*80)
+    print(f"Input: {args.input}")
+    print(f"Pixel size: {args.angpix} Å/px")
+    print(f"Sample step: {args.sample_step} Å")
+    print(f"Polynomial order: {args.poly_order}")
+    print(f"Minimum number of seed: {args.min_seed}")
+    print(f"Distance threshold: {args.dist_thres} Å")
+    print(f"Distance extrapolate: {args.dist_extrapolate} Å")
+    print(f"Overlap threshold: {args.overlap_thres} Å")
+    print(f"Twist angle: {args.twist_angle}°")
+
+    try:
+        df_fitted = run_fitting(args.input, args, step_num=1)
+        df_cleaned = run_cleaning(df_fitted, args, step_num=2)
+        df_connected = run_connection(df_cleaned, args, step_num=3)
+
+        print_step_header(4, "TWIST (POLARITY-AWARE)")
+        from utils.predict import (
+            assign_twist_angles, filter_by_lcc, map_angles_from_template, compute_polarity_flips
+        )
+
+        polarity_flips = None
+        template_path = getattr(args, 'template', None)
+        if template_path and os.path.exists(template_path):
+            try:
+                df_template = read_star(template_path)
+                df_filtered = filter_by_lcc(df_connected, df_template, args.angpix, args.neighbor_rad)
+                df_temp_predicted = map_angles_from_template(
+                    df_connected, df_filtered, args.angpix, args.neighbor_rad)
+                polarity_flips = compute_polarity_flips(df_connected, df_temp_predicted)
+                n_flipped = sum(1 for v in polarity_flips.values() if v == -1)
+                print(f"[INFO] Determined polarity for {len(polarity_flips)} tube(s), "
+                      f"{n_flipped} flipped relative to row order.")
+            except Exception as e:
+                print_warning(f"Could not determine polarity from template ({e}); "
+                              f"applying twist using row order only.")
+        else:
+            print_warning("No raw picks available for polarity correction; "
+                          "applying twist using row order only.")
+
+        df_final = assign_twist_angles(df_connected, args.twist_angle, polarity_flips=polarity_flips)
+
+        if not df_final.empty:
+            write_star(df_final, output_file, overwrite=True)
+            print("\n" + "="*80)
+            print("PIPELINE COMPLETE")
+            print("="*80)
+            print_summary("Final Output", [
+                f"File, Tubes, Particles, Orientation(RotAngle)",
+                f"{output_file},{df_final['rlnHelicalTubeID'].nunique()},{len(df_final)},"
+                f"{df_final['rlnAngleRot'].median():.2f}"
+            ])
+        else:
+            print_warning("Pipeline produced no output particles")
+            sys.exit(1)
+
     except Exception as e:
         print_error(f"{e}")
         sys.exit(1)
@@ -757,6 +899,12 @@ Examples:
     add_twist_arguments(twist_parser)
     twist_parser.set_defaults(func=cmd_twist)
 
+    # JOIN subcommand
+    join_parser = subparsers.add_parser('join', help='Manually merge two tube segments into one')
+    add_common_arguments(join_parser)
+    add_join_arguments(join_parser)
+    join_parser.set_defaults(func=cmd_join)
+
     # SORT subcommand
     sort_parser = subparsers.add_parser('sort', help='Group cilia and sort doublet order')
     add_common_arguments(sort_parser)
@@ -795,7 +943,28 @@ Examples:
 
 
     pipeline_parser.set_defaults(func=cmd_pipeline)
-    
+
+    # PIPELINE_MT subcommand -- Fit -> Clean -> Connect -> Twist (not Predict)
+    pipeline_mt_parser = subparsers.add_parser(
+        'pipeline_mt', help='Run full MT pipeline (Fit -> Clean -> Connect -> Twist)')
+    add_common_arguments(pipeline_mt_parser)
+    add_fit_arguments(pipeline_mt_parser)
+    add_clean_arguments(pipeline_mt_parser)
+
+    pipeline_mt_parser.add_argument('--dist_extrapolate', type=float, required=True,
+                                help='Initial extrapolation distance in Angstroms (REQUIRED)')
+    pipeline_mt_parser.add_argument('--overlap_thres', type=float, required=True,
+                                help='Connection overlap threshold in Angstroms (REQUIRED)')
+    pipeline_mt_parser.add_argument('--iterations', type=int, default=2,
+                                help='Connection iterations (default: 2)')
+    pipeline_mt_parser.add_argument('--dist_scale', type=float, default=1.5,
+                                help='Distance scale factor per iteration (default: 1.5)')
+    pipeline_mt_parser.add_argument('--min_part_per_tube', type=int, default=5,
+                                help='Minimum particles per tube (default: 5)')
+
+    add_twist_arguments(pipeline_mt_parser)
+    pipeline_mt_parser.set_defaults(func=cmd_pipeline_mt)
+
     # Parse arguments
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
